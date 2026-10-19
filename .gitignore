@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.pytest_temp/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Node / WebUI
+node_modules/
+.svelte-kit/
+dev-dist/
+
+# Local sensitive configs & data
+.env
+data/
+*.log
