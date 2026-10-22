@@ -1158,7 +1158,13 @@
 				fetch(`/api/courses/${encodeURIComponent(courseId)}/knowledge`, { headers }),
 				fetch(`/api/courses/${encodeURIComponent(courseId)}/knowledge/relations`, { headers })
 			]);
-			if (!kpRes.ok) return;
+			if (!kpRes.ok) {
+				const payload = (await kpRes.json().catch(() => ({}))) as { detail?: string };
+				throw new Error(payload.detail || `HTTP ${kpRes.status}`);
+			}
+			if (!relRes.ok) {
+				toast.warning('知识关系同步失败，已跳过关系连线');
+			}
 
 			const kpData = (await kpRes.json()) as { knowledge_points?: BackendKnowledgePoint[] };
 			const kps = kpData.knowledge_points ?? [];
@@ -1201,6 +1207,9 @@
 			}
 		} catch (err) {
 			console.warn('Canvas backend hydration skipped:', err);
+			toast.error(
+				`无法从后端同步知识画布：${err instanceof Error ? err.message : String(err)}`
+			);
 		} finally {
 			hydrateInFlight = false;
 		}
@@ -1807,25 +1816,32 @@
 		}
 
 		try {
-			if (isDelete) {
-				await fetch(
-					`/api/courses/${encodeURIComponent(courseId)}/knowledge/relations?src_id=${encodeURIComponent(srcId)}&rel_type=${encodeURIComponent(relType)}&dst_id=${encodeURIComponent(dstId)}`,
-					{ method: 'DELETE', headers: learningJsonHeaders() }
-				);
-			} else {
-				await fetch(`/api/courses/${encodeURIComponent(courseId)}/knowledge/relations`, {
-					body: JSON.stringify({
-						dst_id: dstId,
-						metadata: { edge_id: edge.id },
-						rel_type: relType,
-						src_id: srcId
-					}),
-					headers: learningJsonHeaders(),
-					method: 'POST'
-				});
+			const res = isDelete
+				? await fetch(
+						`/api/courses/${encodeURIComponent(courseId)}/knowledge/relations?src_id=${encodeURIComponent(srcId)}&rel_type=${encodeURIComponent(relType)}&dst_id=${encodeURIComponent(dstId)}`,
+						{ method: 'DELETE', headers: learningJsonHeaders() }
+					)
+				: await fetch(`/api/courses/${encodeURIComponent(courseId)}/knowledge/relations`, {
+						body: JSON.stringify({
+							dst_id: dstId,
+							metadata: { edge_id: edge.id },
+							rel_type: relType,
+							src_id: srcId
+						}),
+						headers: learningJsonHeaders(),
+						method: 'POST'
+					});
+
+			if (!res.ok) {
+				const payload = (await res.json().catch(() => ({}))) as { detail?: string };
+				throw new Error(payload.detail || `HTTP ${res.status}`);
 			}
 		} catch (err) {
-			console.warn('Backend relation sync skipped:', err);
+			toast.error(
+				`${isDelete ? '删除' : '保存'}知识关系失败：${
+					err instanceof Error ? err.message : String(err)
+				}`
+			);
 		}
 	}
 

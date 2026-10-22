@@ -28,6 +28,9 @@ export { tabsStore } from './tabs.svelte';
 // CONTEXT STATS (active conversation context window usage)
 export { contextStatsStore } from './chat/context-stats.svelte';
 
+// RETRIEVAL STATUS (backend RAG hits / learning mode for the latest turn)
+export { retrievalStatusStore } from './retrieval-status.svelte';
+
 // AGENTIC (multi-turn tool orchestration)
 export { agenticStore } from './agentic/index.svelte';
 
