@@ -973,6 +973,67 @@ class LearningStore:
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
+    async def review_knowledge_point(
+        self, kp_id: str, quality: int, *, user_id: str = "default_user"
+    ) -> dict[str, Any]:
+        """按 SM-2 质量分推进某个知识点的复习排期（闪卡自评，不产生作答/错题记录）。"""
+        kp = await self.get_knowledge_point(kp_id, user_id=user_id)
+        if not kp:
+            raise KeyError(f"Knowledge point '{kp_id}' not found")
+
+        now = time.time()
+        q = max(0, min(5, int(quality)))
+        cur = await self.sqlite.conn.execute(
+            "SELECT * FROM mastery WHERE user_id = ? AND kp_id = ?",
+            (user_id, kp["id"]),
+        )
+        row = await cur.fetchone()
+        prev_mastery = float(row["mastery"]) if row else 0.3
+        prev_ef = float(row["ef"]) if row else 2.5
+        prev_interval = float(row["interval_days"]) if row else 0.0
+        prev_reps = int(row["repetitions"]) if row else 0
+
+        sm2 = compute_sm2(prev_ef, prev_interval, prev_reps, q, now=now)
+        new_mastery = update_mastery_ema(
+            prev_mastery, q / 5.0, difficulty=float(kp.get("difficulty") or 0.5)
+        )
+
+        await self.sqlite.conn.execute(
+            """
+            INSERT INTO mastery (user_id, kp_id, mastery, ef, interval_days, repetitions, next_review_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, kp_id) DO UPDATE SET
+                mastery = excluded.mastery,
+                ef = excluded.ef,
+                interval_days = excluded.interval_days,
+                repetitions = excluded.repetitions,
+                next_review_at = excluded.next_review_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                user_id,
+                kp["id"],
+                new_mastery,
+                sm2.ef,
+                sm2.interval_days,
+                sm2.repetitions,
+                sm2.next_review_at,
+                now,
+            ),
+        )
+        await self.sqlite.conn.commit()
+        return {
+            "kp_id": kp["id"],
+            "name": kp.get("name") or kp["id"],
+            "quality": q,
+            "prev_mastery": prev_mastery,
+            "new_mastery": new_mastery,
+            "ef": sm2.ef,
+            "interval_days": sm2.interval_days,
+            "repetitions": sm2.repetitions,
+            "next_review_at": sm2.next_review_at,
+        }
+
     async def list_mistakes(self, user_id: str, resolved: bool = False, limit: int = 20) -> list[dict[str, Any]]:
         cur = await self.sqlite.conn.execute(
             """
