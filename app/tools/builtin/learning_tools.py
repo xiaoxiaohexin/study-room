@@ -133,7 +133,6 @@ class QuizTool(Tool):
                 "description": "题型：choice（单选）、fill（填空）、short_answer（简答），默认 choice",
             },
             "difficulty": {"type": "number", "description": "难度 0.1~1.0（默认自动按掌握度匹配）"},
-            "namespace": {"type": "string", "description": "知识库命名空间（默认 default）"},
         },
         "required": ["action"],
     }
@@ -148,9 +147,9 @@ class QuizTool(Tool):
         topic = (arguments.get("topic") or "").strip()
         q_type = arguments.get("question_type") or "choice"
         # The session scope is authoritative for both retrieval and course binding.
-        namespace = (
-            arguments.get("namespace") or context.rag_namespace or "default"
-        ).strip() or "default"
+        # The model cannot pick a knowledge base; it often mistakes the course id
+        # for a namespace, which silently empties retrieval.
+        namespace = (context.rag_namespace or "default").strip() or "default"
         effective_course = context.course_id or namespace
 
         if action == "next" and not topic:
