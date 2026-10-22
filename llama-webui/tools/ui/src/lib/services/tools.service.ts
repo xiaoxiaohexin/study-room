@@ -8,10 +8,34 @@
 import { base } from '$app/paths';
 import { API_TOOLS, HEADERS } from '$lib/constants';
 import { ToolResponseField } from '$lib/enums';
+// direct store import, not via the barrel, to avoid circular deps
+import { conversationsStore } from '$lib/stores/conversations/index.svelte';
 import type { ServerToolInfo, ToolExecutionResult } from '$lib/types';
 import { apiFetch } from '$lib/utils';
 import { getJsonHeaders } from '$lib/utils/api-headers';
 import { parseSseJsonStream, type SseJsonEvent } from '$lib/utils/sse';
+
+/**
+ * Tool calls are separate requests from the chat turn that triggered them, so
+ * the learning scope has to travel along or the backend falls back to the
+ * default course/namespace.
+ */
+function learningScopeHeaders(): Record<string, string> {
+	const preferences = conversationsStore.preferences;
+	const namespace = (preferences?.getRagNamespace?.() || 'default').trim() || 'default';
+	const courseId = (preferences?.getCourseId?.() || '').trim();
+	const conversationId = conversationsStore.activeConversation?.id ?? '';
+
+	const headers: Record<string, string> = {
+		[HEADERS.X_RAG_NAMESPACE_HEADER]: namespace
+	};
+
+	if (courseId) headers[HEADERS.X_COURSE_ID_HEADER] = courseId;
+
+	if (conversationId) headers[HEADERS.X_CONVERSATION_ID_HEADER] = conversationId;
+
+	return headers;
+}
 
 export class ToolsService {
 	/**
@@ -29,7 +53,10 @@ export class ToolsService {
 	): Promise<ToolExecutionResult> {
 		const result = await apiFetch<Record<string, unknown>>(API_TOOLS.EXECUTE, {
 			body: JSON.stringify({ params, tool: toolName }),
-			headers: cwd ? { [HEADERS.X_TOOL_CWD_HEADER]: cwd } : undefined,
+			headers: {
+				...learningScopeHeaders(),
+				...(cwd ? { [HEADERS.X_TOOL_CWD_HEADER]: cwd } : {})
+			},
 			method: 'POST',
 			signal
 		});
@@ -60,7 +87,7 @@ export class ToolsService {
 		cwd?: string,
 		respType?: string
 	): Promise<Record<string, unknown>> {
-		const headers: Record<string, string> = {};
+		const headers: Record<string, string> = { ...learningScopeHeaders() };
 
 		if (cwd) headers[HEADERS.X_TOOL_CWD_HEADER] = cwd;
 
@@ -68,7 +95,7 @@ export class ToolsService {
 
 		return apiFetch<Record<string, unknown>>(API_TOOLS.EXECUTE, {
 			body: JSON.stringify({ params, tool: toolName }),
-			headers: Object.keys(headers).length > 0 ? headers : undefined,
+			headers,
 			method: 'POST',
 			signal
 		});
@@ -104,7 +131,7 @@ export class ToolsService {
 		signal?: AbortSignal,
 		cwd?: string
 	): AsyncGenerator<ToolStreamEvent> {
-		const headers = getJsonHeaders();
+		const headers = { ...getJsonHeaders(), ...learningScopeHeaders() };
 
 		if (cwd) headers[HEADERS.X_TOOL_CWD_HEADER] = cwd;
 

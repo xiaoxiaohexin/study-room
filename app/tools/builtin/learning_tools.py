@@ -359,16 +359,26 @@ class GradeTool(Tool):
 
 class ReviewTool(Tool):
     name = "review_tool"
-    description = "间隔复习与错题本管理工具。支持 action='due'（查看今日到期复习知识点与未解决错题）和 action='resolve'（标记错题已掌握）。"
+    description = (
+        "间隔复习与错题本管理工具。支持 action='due'（查看今日到期复习知识点与未解决错题）、"
+        "action='resolve'（标记错题已掌握）和 action='grade'（按 SM-2 质量分记录一次闪卡自评）。"
+    )
     parameters_schema = {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["due", "resolve"],
-                "description": "due（查看待复习与错题）或 resolve（消除错题）",
+                "enum": ["due", "resolve", "grade"],
+                "description": "due（查看待复习与错题）、resolve（消除错题）或 grade（记录复习评分）",
             },
             "mistake_id": {"type": "string", "description": "要标记为已掌握的错题ID（resolve 时必填）"},
+            "kp_id": {"type": "string", "description": "要评分的知识点ID（grade 时必填）"},
+            "quality": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5,
+                "description": "SM-2 质量分 0~5（grade 时必填；<3 视为遗忘，重置复习轮次）",
+            },
         },
         "required": ["action"],
     }
@@ -386,6 +396,36 @@ class ReviewTool(Tool):
             return ToolResult(
                 ok=True,
                 output=f"错题 [{mid}] 已标记为掌握！" if ok else f"未找到错题 [{mid}]。",
+            )
+
+        if action == "grade":
+            kp_id = (arguments.get("kp_id") or "").strip()
+            if not kp_id:
+                return ToolResult(ok=False, error="kp_id 不能为空。")
+            try:
+                quality = int(arguments.get("quality"))
+            except (TypeError, ValueError):
+                return ToolResult(ok=False, error="quality 必须是 0~5 的整数。")
+            if not 0 <= quality <= 5:
+                return ToolResult(ok=False, error="quality 必须是 0~5 的整数。")
+            try:
+                rec = await self.store.review_knowledge_point(
+                    kp_id, quality, user_id=context.user_id
+                )
+            except KeyError:
+                return ToolResult(ok=False, error=f"知识点 [{kp_id}] 不存在。")
+            except (PermissionError, ValueError) as e:
+                return ToolResult(ok=False, error=str(e))
+            next_dt = datetime.datetime.fromtimestamp(rec["next_review_at"]).strftime("%Y-%m-%d %H:%M")
+            return ToolResult(
+                ok=True,
+                output=(
+                    f"已记录 SM-2 评分 {rec['quality']}/5：知识点 [{rec['kp_id']}] {rec['name']}\n"
+                    f"- 掌握度: {rec['prev_mastery']:.2f} -> {rec['new_mastery']:.2f}\n"
+                    f"- 下次复习间隔: {rec['interval_days']} 天后 ({next_dt})\n"
+                    f"- EF: {rec['ef']}"
+                ),
+                metadata=rec,
             )
 
         due_list = await self.store.get_due_reviews(context.user_id, limit=10)

@@ -27,7 +27,6 @@
 		ZoomOut
 	} from '@lucide/svelte';
 	import { browser } from '$app/environment';
-	import { base } from '$app/paths';
 	import { MarkdownContent } from '$lib/components/app';
 	import { Button } from '$lib/components/ui/button';
 	import { AttachmentType, MessageRole } from '$lib/enums';
@@ -37,6 +36,7 @@
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import { provenanceNavigation } from '$lib/services/provenance-navigation.service';
+	import { ToolsService } from '$lib/services/tools.service';
 	import {
 		getActiveCourseId,
 		getActiveRagNamespace,
@@ -1617,6 +1617,7 @@
 			x: node.x + node.width + 40,
 			y: node.y,
 			flipped: false,
+			cardId: node.knowledgePointId,
 			sm2Interval: 1,
 			sm2Easiness: 2.5
 		};
@@ -2271,24 +2272,19 @@
 		savingNodeId = node.id;
 
 		try {
-			const res = await fetch(`${base}/tools`, {
-				body: JSON.stringify({
-					arguments: {
-						action: 'create',
-						content: node.content,
-						title: node.title.replace(/^📝\s*/, '') || '画布便签'
-					},
-					name: 'note_tool'
-				}),
-				headers: { 'Content-Type': 'application/json' },
-				method: 'POST'
+			const result = await ToolsService.executeTool('note_tool', {
+				action: 'create',
+				content: node.content,
+				title: node.title.replace(/^📝\s*/, '') || '画布便签'
 			});
 
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			if (result.isError) throw new Error(result.content);
 
-			toast.success('便签已同步保存到后端 Markdown 笔记库');
-		} catch {
-			toast.error('保存便签到后端失败');
+			toast.success(`便签已保存到后端笔记库（${result.content}）`);
+		} catch (err) {
+			toast.error(
+				`保存便签到后端失败：${err instanceof Error ? err.message : String(err)}`
+			);
 		} finally {
 			savingNodeId = null;
 		}
@@ -2302,29 +2298,23 @@
 		savingNodeId = nodeId;
 
 		try {
-			const res = await fetch(`${base}/tools`, {
-				body: JSON.stringify({
-					arguments: { limit: 1 },
-					name: 'review_tool'
-				}),
-				headers: { 'Content-Type': 'application/json' },
-				method: 'POST'
-			});
+			const result = await ToolsService.executeTool('review_tool', { action: 'due' });
 
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			if (result.isError) throw new Error(result.content);
 
-			const data = await res.json();
-			const text: string = data.content ?? '';
+			const text = result.content;
 
-			if (text && !text.includes('暂无待复习')) {
+			if (text && !text.includes('暂无到期')) {
 				customNodes[idx].content = text;
 				customNodes[idx].flipped = false;
 				toast.success('已从后端拉取待复习闪卡');
 			} else {
 				toast.info('当前暂无到期闪卡，已为你保留示例闪卡');
 			}
-		} catch {
-			toast.error('同步后端复习卡片失败');
+		} catch (err) {
+			toast.error(
+				`同步后端复习卡片失败：${err instanceof Error ? err.message : String(err)}`
+			);
 		} finally {
 			savingNodeId = null;
 			persistCanvasState();
@@ -2350,21 +2340,28 @@
 		customNodes[idx].flipped = false;
 		persistCanvasState();
 
-		toast.success(`SM-2 评分已记录（评分 ${quality} → 下次复习间隔 ${nextInterval} 天，EF=${nextEf}）`);
+		if (!node.cardId) {
+			toast.success(`SM-2 评分已记录（评分 ${quality} → 下次复习间隔 ${nextInterval} 天，EF=${nextEf}）`);
 
-		if (node.cardId) {
-			try {
-				await fetch(`${base}/tools`, {
-					body: JSON.stringify({
-						arguments: { card_id: node.cardId, quality },
-						name: 'grade_tool'
-					}),
-					headers: { 'Content-Type': 'application/json' },
-					method: 'POST'
-				});
-			} catch {
-				// Ignore background sync error
-			}
+			return;
+		}
+
+		try {
+			const result = await ToolsService.executeTool('review_tool', {
+				action: 'grade',
+				kp_id: node.cardId,
+				quality
+			});
+
+			if (result.isError) throw new Error(result.content);
+
+			toast.success(
+				`SM-2 评分已记录并同步后端（评分 ${quality} → 下次复习间隔 ${nextInterval} 天，EF=${nextEf}）`
+			);
+		} catch (err) {
+			toast.warning(
+				`本地已记录评分，但后端同步失败：${err instanceof Error ? err.message : String(err)}`
+			);
 		}
 	}
 
