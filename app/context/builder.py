@@ -130,7 +130,12 @@ class ContextBuilder:
         # 5. 检索到的知识库文档
         for d in docs or []:
             hdr = f" ({' > '.join(d.headers)})" if d.headers else ""
-            text = f"[DOCUMENT: {d.filename}{hdr}]\n{d.content}"
+            page_label = getattr(d, "page_label", None)
+            if not page_label:
+                p_start = getattr(d, "page_start", 1)
+                p_end = getattr(d, "page_end", p_start)
+                page_label = f"P.{p_start}" if p_start == p_end else f"P.{p_start}-{p_end}"
+            text = f"[DOCUMENT: {d.filename} {page_label}{hdr}]\n{d.content}"
             packets.append(
                 ContextPacket(
                     id=f"doc_{d.id}",

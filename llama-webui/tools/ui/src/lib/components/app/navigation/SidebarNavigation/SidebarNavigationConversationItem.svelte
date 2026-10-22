@@ -16,6 +16,7 @@
 	import { Checkbox } from '$lib/components/ui/checkbox';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import { FORK_TREE_DEPTH_PADDING, ICON_CLASS_DEFAULT, UI_DATA_ATTRS } from '$lib/constants';
+	import { getKnowledgeBaseBadgeLabel } from '$lib/constants/knowledge-base.constants';
 	import { RouterService } from '$lib/services/router.service';
 	import { chatStore, conversationsStore } from '$lib/stores';
 	import { onMount } from 'svelte';
@@ -56,6 +57,9 @@
 	let dropdownOpen = $state(false);
 
 	let isLoading = $derived(chatStore.getAllLoadingChats().includes(conversation.id));
+	let kbBadge = $derived(
+		getKnowledgeBaseBadgeLabel(conversation.ragNamespace, conversation.courseId)
+	);
 
 	function handleEdit(event: Event) {
 		event.stopPropagation();
@@ -238,6 +242,15 @@
 		{/if}
 
 		<TruncatedText class="text-sm font-medium" showTooltip={false} text={conversation.name} />
+
+		{#if kbBadge}
+			<span
+				class="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium leading-none bg-primary/10 text-primary border border-primary/20 dark:bg-primary/20 dark:text-primary-foreground max-w-[72px] truncate"
+				title={`知识库: ${conversation.ragNamespace || 'default'}${conversation.courseId ? ` (${conversation.courseId})` : ''}`}
+			>
+				{kbBadge}
+			</span>
+		{/if}
 	</div>
 
 	{#if !isSelectionMode && renderActionsDropdown}

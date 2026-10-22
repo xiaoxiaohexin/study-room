@@ -1,8 +1,12 @@
-import pytest
 from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
+
 from app.agent.loop import AgentLoop
 from app.agent.reflection import Reflector
 from app.context.builder import ContextBuilder
+from app.learning.router import IntentRouter
 from app.llm.embedding import HashingEmbedder
 from app.llm.fake import FakeLLM
 from app.memory.episodic import EpisodicMemory
@@ -18,7 +22,6 @@ from app.rag.loader import DocumentLoader
 from app.rag.pipeline import IngestionPipeline
 from app.rag.retriever import RagRetriever
 from app.schemas.events import EventType
-from app.schemas.messages import ToolCall
 from app.schemas.requests import ChatRequest
 from app.session.state_manager import SessionStateManager
 from app.storage.graph import NullGraphStore
@@ -48,7 +51,7 @@ async def test_agent_loop_multistep_execution(tmp_path: Path):
 
     loader = DocumentLoader()
     chunker = MarkdownChunker()
-    pipeline = IngestionPipeline(loader, chunker, embedder, vec)
+    IngestionPipeline(loader, chunker, embedder, vec)
     retriever = RagRetriever(vec, embedder)
 
     ctx_builder = ContextBuilder(max_tokens=4000)
@@ -105,5 +108,51 @@ async def test_agent_loop_multistep_execution(tmp_path: Path):
     # 检查笔记是否真正落盘
     notes = list(notes_dir.rglob("*.md"))
     assert len(notes) == 1
+
+    await sqlite.aclose()
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_skips_retrieval_for_smalltalk(tmp_path: Path):
+    sqlite = SQLiteStore(tmp_path / "smalltalk.db")
+    await sqlite.initialize()
+    state_mgr = SessionStateManager(sqlite)
+    session = await state_mgr.get_or_create_session("u1")
+
+    fake_llm = FakeLLM(responses=["Thought: 简单问候。\nFinish[你好，有什么可以帮你？]"])
+    memory_manager = AsyncMock()
+    retriever = AsyncMock()
+    query_expander = AsyncMock()
+    loop = AgentLoop(
+        llm=fake_llm,
+        tools=ToolRegistry(),
+        parser=ToolCallParser(),
+        context_builder=ContextBuilder(max_tokens=2000),
+        query_expander=query_expander,
+        memory_manager=memory_manager,
+        rag_retriever=retriever,
+        state_manager=state_mgr,
+        reflector=Reflector(fake_llm),
+        dialogue_logger=DialogueLogger(tmp_path / "logs"),
+        use_native_tools=False,
+        intent_router=IntentRouter(),
+    )
+
+    request = ChatRequest(
+        user_id="u1",
+        session_id=session.session_id,
+        message="你好",
+        enable_query_expansion=True,
+    )
+    events = [event async for event in loop.run(request, session)]
+
+    retrieval_events = [
+        event for event in events if event.type == EventType.STATUS and event.data.get("stage") == "retrieval_skipped"
+    ]
+    assert retrieval_events
+    assert not [event for event in events if event.type == EventType.TOOL_CALL]
+    retriever.search.assert_not_awaited()
+    memory_manager.retrieve_all.assert_not_awaited()
+    query_expander.expand.assert_not_awaited()
 
     await sqlite.aclose()

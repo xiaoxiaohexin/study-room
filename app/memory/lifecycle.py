@@ -31,14 +31,14 @@ class MemoryLifecycle:
         self.forget_max_age_days = forget_max_age_days
         self.forget_capacity = forget_capacity
 
-    async def consolidate(self, user_id: str) -> dict[str, int]:
+    async def consolidate(self, user_id: str, session_id: str | None = None) -> dict[str, int]:
         """将高重要度的工作记忆沉淀到情景记忆，将高重要度的情景记忆提炼到语义记忆。"""
-        log.info("memory_consolidate_started", user_id=user_id)
+        log.info("memory_consolidate_started", user_id=user_id, session_id=session_id)
         w_to_e_count = 0
         e_to_s_count = 0
 
         # 1. Working -> Episodic
-        w_items = await self.working.list_items(user_id, limit=100)
+        w_items = await self.working.list_items(user_id, limit=100, session_id=session_id)
         to_episodic = [it for it in w_items if it.importance >= self.consolidate_working_thresh]
         for it in to_episodic:
             new_item = MemoryItem(
@@ -52,10 +52,14 @@ class MemoryLifecycle:
             await self.episodic.add(new_item)
             w_to_e_count += 1
         if to_episodic:
-            await self.working.remove([it.id for it in to_episodic])
+            await self.working.remove(
+                [it.id for it in to_episodic],
+                user_id=user_id,
+                session_id=session_id,
+            )
 
         # 2. Episodic -> Semantic
-        e_items = await self.episodic.list_items(user_id, limit=100)
+        e_items = await self.episodic.list_items(user_id, limit=100, session_id=session_id)
         to_semantic = [it for it in e_items if it.importance >= self.consolidate_episodic_thresh]
         for it in to_semantic:
             new_item = MemoryItem(
@@ -70,7 +74,7 @@ class MemoryLifecycle:
             e_to_s_count += 1
 
         result = {"working_to_episodic": w_to_e_count, "episodic_to_semantic": e_to_s_count}
-        log.info("memory_consolidate_completed", user_id=user_id, **result)
+        log.info("memory_consolidate_completed", user_id=user_id, session_id=session_id, **result)
         return result
 
     async def forget(
@@ -102,7 +106,7 @@ class MemoryLifecycle:
                 to_remove_ids = [it.id for it in sorted_items[: len(items) - cap]]
 
         if to_remove_ids:
-            await self.episodic.remove(to_remove_ids)
+            await self.episodic.remove(to_remove_ids, user_id=user_id)
 
         log.info(
             "memory_forget_completed", user_id=user_id, removed_count=len(to_remove_ids), strategy=strategy

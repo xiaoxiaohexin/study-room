@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException
+from urllib.parse import unquote
+
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
 from app.api.deps import get_container
@@ -19,12 +21,66 @@ router = APIRouter(prefix="/api/chat", tags=["Chat"])
 
 
 @router.post("", response_model=ChatResponse)
-async def chat_sync(request: ChatRequest, container: AppContainer = Depends(get_container)):
+async def chat_sync(
+    request: ChatRequest,
+    x_rag_namespace: str | None = Header(None, alias="X-RAG-Namespace"),
+    x_course_id: str | None = Header(None, alias="X-Course-Id"),
+    container: AppContainer = Depends(get_container),
+):
     """非流式对话接口：收集全部推理步骤与最终回答后一次性返回。"""
     log.info("chat_sync_requested", user_id=request.user_id, session_id=request.session_id)
-    session = await container.state_manager.get_or_create_session(
-        user_id=request.user_id, session_id=request.session_id
+
+    # 1. 并发锁快速探测：若该会话已持有锁，直接返回 409 杜绝死锁与并发冲突
+    if request.session_id:
+        lock = container.state_manager.get_lock(request.session_id)
+        if lock.locked():
+            log.warning("concurrent_request_conflict", session_id=request.session_id)
+            raise HTTPException(status_code=409, detail="A request is already running in this session.")
+
+    raw_header_ns = unquote(x_rag_namespace) if x_rag_namespace else None
+    clean_header_rag_ns = raw_header_ns.strip() if raw_header_ns and raw_header_ns.strip() else None
+    clean_body_rag_ns = request.rag_namespace.strip() if request.rag_namespace and request.rag_namespace.strip() else None
+    raw_header_cid = unquote(x_course_id) if x_course_id else None
+    clean_header_course_id = raw_header_cid.strip() if raw_header_cid and raw_header_cid.strip() else None
+    clean_body_course_id = request.course_id.strip() if request.course_id and request.course_id.strip() else None
+
+    # 2. 读取已有会话或创建新会话（单轮对话不得篡改已有会话在 DB 中的持久化知识库绑定）
+    session = None
+    if request.session_id:
+        session = await container.state_manager.get_session(user_id=request.user_id, session_id=request.session_id)
+    if session is None:
+        session = await container.state_manager.get_or_create_session(
+            user_id=request.user_id,
+            session_id=request.session_id,
+            course_id=clean_body_course_id or clean_header_course_id,
+            rag_namespace=clean_body_rag_ns or clean_header_rag_ns,
+        )
+
+    clean_session_rag_ns = (
+        session.rag_namespace.strip()
+        if session.rag_namespace and session.rag_namespace.strip()
+        else None
     )
+    clean_session_course_id = (
+        session.course_id.strip()
+        if session.course_id and session.course_id.strip()
+        else None
+    )
+
+    effective_rag_ns = (
+        clean_header_rag_ns
+        or clean_body_rag_ns
+        or clean_session_rag_ns
+        or "default"
+    )
+    effective_course_id = (
+        clean_header_course_id
+        or clean_body_course_id
+        or clean_session_course_id
+        or None
+    )
+    request.rag_namespace = effective_rag_ns
+    request.course_id = effective_course_id
 
     lock = container.state_manager.get_lock(session.session_id)
     if lock.locked():
@@ -60,12 +116,66 @@ async def chat_sync(request: ChatRequest, container: AppContainer = Depends(get_
 
 
 @router.post("/stream")
-async def chat_stream(request: ChatRequest, container: AppContainer = Depends(get_container)):
+async def chat_stream(
+    request: ChatRequest,
+    x_rag_namespace: str | None = Header(None, alias="X-RAG-Namespace"),
+    x_course_id: str | None = Header(None, alias="X-Course-Id"),
+    container: AppContainer = Depends(get_container),
+):
     """SSE 流式事件接口：实时推送 Thought / ToolCall / Observation / Reflection / Token / Final 事件。"""
     log.info("chat_stream_requested", user_id=request.user_id, session_id=request.session_id)
-    session = await container.state_manager.get_or_create_session(
-        user_id=request.user_id, session_id=request.session_id
+
+    # 1. 并发锁快速探测：若该会话已持有锁，直接返回 409 杜绝死锁与并发冲突
+    if request.session_id:
+        lock = container.state_manager.get_lock(request.session_id)
+        if lock.locked():
+            log.warning("concurrent_request_conflict", session_id=request.session_id)
+            raise HTTPException(status_code=409, detail="A request is already running in this session.")
+
+    raw_header_ns = unquote(x_rag_namespace) if x_rag_namespace else None
+    clean_header_rag_ns = raw_header_ns.strip() if raw_header_ns and raw_header_ns.strip() else None
+    clean_body_rag_ns = request.rag_namespace.strip() if request.rag_namespace and request.rag_namespace.strip() else None
+    raw_header_cid = unquote(x_course_id) if x_course_id else None
+    clean_header_course_id = raw_header_cid.strip() if raw_header_cid and raw_header_cid.strip() else None
+    clean_body_course_id = request.course_id.strip() if request.course_id and request.course_id.strip() else None
+
+    # 2. 读取已有会话或创建新会话（单轮对话不得篡改已有会话在 DB 中的持久化知识库绑定）
+    session = None
+    if request.session_id:
+        session = await container.state_manager.get_session(user_id=request.user_id, session_id=request.session_id)
+    if session is None:
+        session = await container.state_manager.get_or_create_session(
+            user_id=request.user_id,
+            session_id=request.session_id,
+            course_id=clean_body_course_id or clean_header_course_id,
+            rag_namespace=clean_body_rag_ns or clean_header_rag_ns,
+        )
+
+    clean_session_rag_ns = (
+        session.rag_namespace.strip()
+        if session.rag_namespace and session.rag_namespace.strip()
+        else None
     )
+    clean_session_course_id = (
+        session.course_id.strip()
+        if session.course_id and session.course_id.strip()
+        else None
+    )
+
+    effective_rag_ns = (
+        clean_header_rag_ns
+        or clean_body_rag_ns
+        or clean_session_rag_ns
+        or "default"
+    )
+    effective_course_id = (
+        clean_header_course_id
+        or clean_body_course_id
+        or clean_session_course_id
+        or None
+    )
+    request.rag_namespace = effective_rag_ns
+    request.course_id = effective_course_id
 
     lock = container.state_manager.get_lock(session.session_id)
     if lock.locked():

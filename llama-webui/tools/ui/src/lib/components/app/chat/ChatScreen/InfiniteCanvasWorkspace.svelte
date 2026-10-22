@@ -36,87 +36,36 @@
 	import { copyToClipboard } from '$lib/utils';
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
-
-	export type CanvasViewMode = 'canvas' | 'split' | 'list';
-
-	type NodeCardColor = 'amber' | 'sky' | 'emerald' | 'violet' | 'rose' | 'slate';
-	type CustomNodeKind = 'note' | 'rag' | 'flashcard' | 'hub' | 'image';
-
-	interface TurnImageItem {
-		id: string;
-		name: string;
-		url: string;
-		source: 'message' | 'custom' | 'linked' | 'inherited';
-	}
-
-	interface TurnDocItem {
-		id: string;
-		name: string;
-		content: string;
-		kind: string;
-	}
-
-	interface TurnMemoryItem {
-		id: string;
-		front: string;
-		back: string;
-		interval: number;
-		easiness: number;
-		flipped?: boolean;
-	}
-
-	interface TurnAssociationData {
-		customImages?: Array<{ id: string; name: string; url: string }>;
-		activeImageIndex?: number;
-		inheritedImages?: boolean;
-		imagePlacement?: 'top' | 'side' | 'hidden';
-		ragItems?: Array<{ content: string; source: string; score: number }>;
-		ragLoading?: boolean;
-		ragExpanded?: boolean;
-		memoryItems?: TurnMemoryItem[];
-		memoryExpanded?: boolean;
-		expandedDocId?: string | null;
-	}
-
-	interface CustomCanvasNode {
-		id: string;
-		kind: CustomNodeKind;
-		title: string;
-		content: string;
-		backContent?: string;
-		flipped?: boolean;
-		ragQuery?: string;
-		ragResults?: Array<{ content: string; source: string; score: number }>;
-		ragLoading?: boolean;
-		cardId?: string;
-		sm2Interval?: number;
-		sm2Easiness?: number;
-		images?: Array<{ id: string; name: string; url: string }>;
-		activeImageIndex?: number;
-		linkedTurnId?: string;
-		color: NodeCardColor;
-		x: number;
-		y: number;
-		width: number;
-	}
-
-	interface CanvasEdge {
-		id: string;
-		from: string;
-		to: string;
-		label?: string;
-		isAuto?: boolean;
-	}
-
-	interface PersistedCanvasData {
-		panX: number;
-		panY: number;
-		zoom: number;
-		nodePositions: Record<string, { x: number; y: number }>;
-		customNodes: CustomCanvasNode[];
-		customEdges: CanvasEdge[];
-		turnAssociations?: Record<string, TurnAssociationData>;
-	}
+	import { provenanceNavigation } from '$lib/services/provenance-navigation.service';
+	import {
+		getActiveCourseId,
+		getActiveRagNamespace,
+		getActiveUserId,
+		learningJsonHeaders
+	} from '$lib/services/learning-context';
+	import {
+		mapBackendHistoryToRevisions,
+		mergeBackendKnowledgePoints,
+		mapBackendRelationsToEdges,
+		type BackendKnowledgePoint,
+		type BackendRelation
+	} from '$lib/services/canvas-sync';
+	import { buildSiblingInfoMap } from '$lib/utils';
+	import type {
+		CanvasEdge,
+		CanvasViewMode,
+		CustomCanvasNode,
+		CustomNodeKind,
+		KnowledgeRevision,
+		NodeCardColor,
+		PersistedCanvasData,
+		ProvenanceAnchor,
+		SemanticRelationType,
+		TurnAssociationData,
+		TurnDocItem,
+		TurnImageItem,
+		TurnMemoryItem
+	} from '$lib/types/canvas';
 
 	interface Props {
 		messages?: DatabaseMessage[];
@@ -143,6 +92,7 @@
 	let zoom = $state(0.95);
 
 	let isPanning = $state(false);
+	let isNavigating = $state(false);
 	let panStartMouse = $state({ x: 0, y: 0 });
 	let panStartOffset = $state({ x: 0, y: 0 });
 
@@ -157,6 +107,62 @@
 	let expandedReasoning = $state<Record<string, boolean>>({});
 	let turnAssociations = $state<Record<string, TurnAssociationData>>({});
 	let savingNodeId = $state<string | null>(null);
+	let pendingBranchSourceNodeId = $state<string | null>(null);
+
+	const RELATION_CONFIG: Record<
+		SemanticRelationType,
+		{
+			label: string;
+			color: string;
+			stroke: string;
+			border: string;
+			bg: string;
+			marker: string;
+			dash?: string;
+		}
+	> = {
+		prerequisite: {
+			bg: 'fill-sky-500/15',
+			border: 'stroke-sky-500/60',
+			color: 'fill-sky-700 dark:fill-sky-300',
+			label: '前置知识',
+			marker: 'url(#canvas-arrow-sky)',
+			stroke: 'stroke-sky-500'
+		},
+		causal: {
+			bg: 'fill-amber-500/15',
+			border: 'stroke-amber-500/60',
+			color: 'fill-amber-700 dark:fill-amber-300',
+			label: '因果关系',
+			marker: 'url(#canvas-arrow-amber)',
+			stroke: 'stroke-amber-500'
+		},
+		similar: {
+			bg: 'fill-purple-500/15',
+			border: 'stroke-purple-500/60',
+			color: 'fill-purple-700 dark:fill-purple-300',
+			dash: '6 4',
+			label: '相似概念',
+			marker: 'url(#canvas-arrow-purple)',
+			stroke: 'stroke-purple-500'
+		},
+		branch_followup: {
+			bg: 'fill-emerald-500/15',
+			border: 'stroke-emerald-500/60',
+			color: 'fill-emerald-700 dark:fill-emerald-300',
+			label: '分支追问',
+			marker: 'url(#canvas-arrow-emerald)',
+			stroke: 'stroke-emerald-500'
+		},
+		default: {
+			bg: 'fill-background/90',
+			border: 'stroke-border',
+			color: 'fill-muted-foreground',
+			label: '关联',
+			marker: 'url(#canvas-arrow)',
+			stroke: 'stroke-primary/40'
+		}
+	};
 
 	// Lightbox state for high-res image inspection
 	let lightboxImages = $state<TurnImageItem[]>([]);
@@ -248,6 +254,56 @@
 	let activeMessagesList = $derived(
 		messages && messages.length > 0 ? messages : conversationsStore.activeMessages
 	);
+
+	// Full message tree of the conversation (all branches) for sibling switching.
+	let allConversationMessages = $state<DatabaseMessage[]>([]);
+	let siblingInfoByMessageId = $derived(buildSiblingInfoMap(allConversationMessages));
+
+	async function refreshAllConversationMessages(): Promise<void> {
+		const conversation = conversationsStore.activeConversation;
+		if (!conversation?.id) {
+			allConversationMessages = [];
+			return;
+		}
+		try {
+			allConversationMessages = await conversationsStore.getConversationMessages(conversation.id);
+		} catch (err) {
+			console.warn('Failed to load conversation message tree:', err);
+		}
+	}
+
+	function getTurnBranchInfo(turn: ChatTurnNode): {
+		current: number;
+		total: number;
+	} | null {
+		// Branch divergence happens at the user-message level (a follow-up question
+		// becomes a sibling of the previous question); fall back to the reply id.
+		const anchorId = turn.userMessage?.id ?? turn.assistantMessage?.id;
+		if (!anchorId) return null;
+		const info = siblingInfoByMessageId.get(anchorId);
+		if (!info || info.totalSiblings <= 1) return null;
+		return { current: info.currentIndex + 1, total: info.totalSiblings };
+	}
+
+	async function switchTurnBranch(turn: ChatTurnNode, delta: number): Promise<void> {
+		const anchorId = turn.userMessage?.id ?? turn.assistantMessage?.id;
+		if (!anchorId) return;
+		const info = siblingInfoByMessageId.get(anchorId);
+		if (!info || info.totalSiblings <= 1) return;
+		const nextIndex = (info.currentIndex + delta + info.totalSiblings) % info.totalSiblings;
+		const targetLeaf = info.siblingIds[nextIndex];
+		if (!targetLeaf) return;
+		await conversationsStore.navigateToSibling(targetLeaf);
+		await refreshAllConversationMessages();
+		toast.success(`已切换到学习分支 ${nextIndex + 1}/${info.totalSiblings}`);
+	}
+
+	$effect(() => {
+		void activeMessagesList.length;
+		void conversationsStore.activeConversation?.id;
+		void refreshAllConversationMessages();
+	});
+
 
 	// Collect all images uploaded anywhere in the current conversation so follow-up turns
 	// (like "我这里还有一些题目，你看一下我掌握的怎么样了" or "解析这道题") can reference them
@@ -707,9 +763,9 @@
 		assoc.ragExpanded = true;
 
 		try {
-			const res = await fetch(`${base}/api/v1/rag/search`, {
-				body: JSON.stringify({ query, top_k: 3 }),
-				headers: { 'Content-Type': 'application/json' },
+			const res = await fetch('/api/v1/rag/search', {
+				body: JSON.stringify({ query, namespace: getActiveRagNamespace(), top_k: 3 }),
+				headers: learningJsonHeaders(),
 				method: 'POST'
 			});
 
@@ -719,10 +775,16 @@
 			const items = Array.isArray(data.results) ? data.results : [];
 
 			const mappedRagItems = items.map(
-				(r: { content?: string; text?: string; metadata?: { source?: string }; score?: number }) => ({
+				(r: {
+					content?: string;
+					text?: string;
+					filename?: string;
+					metadata?: { source?: string; filename?: string };
+					score?: number;
+				}) => ({
 					content: (r.content ?? r.text ?? '').slice(0, 320),
 					score: typeof r.score === 'number' ? r.score : 0,
-					source: r.metadata?.source ?? '本地知识库'
+					source: r.filename ?? r.metadata?.filename ?? r.metadata?.source ?? '本地知识库'
 				})
 			);
 
@@ -913,6 +975,52 @@
 		return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
 	}
 
+	function normalizeCustomNode(rawNode: CustomCanvasNode): CustomCanvasNode {
+		if (rawNode.kind === 'knowledge') {
+			const provList: ProvenanceAnchor[] = Array.isArray(rawNode.provenance)
+				? rawNode.provenance
+				: rawNode.provenance
+					? [rawNode.provenance]
+					: [];
+
+			const revList: KnowledgeRevision[] =
+				Array.isArray(rawNode.revisions) && rawNode.revisions.length > 0
+					? rawNode.revisions
+					: [
+							{
+								version: 1,
+								timestamp: Date.now(),
+								editor: 'user',
+								changeType: 'initial',
+								summary: '初始版本',
+								content: rawNode.content || '',
+								title: rawNode.title || '',
+								quoteSnippet: provList[0]?.quoteSnippet || rawNode.rawQuote || '',
+								rawQuote: rawNode.rawQuote || provList[0]?.quoteSnippet || '',
+								difficulty: rawNode.difficulty ?? 0.5
+							}
+						];
+
+			return {
+				...rawNode,
+				kind: 'knowledge',
+				color: rawNode.color || 'emerald',
+				width: typeof rawNode.width === 'number' ? rawNode.width : 380,
+				difficulty: typeof rawNode.difficulty === 'number' ? rawNode.difficulty : 0.5,
+				mastery: typeof rawNode.mastery === 'number' ? rawNode.mastery : 0.3,
+				currentVersion:
+					typeof rawNode.currentVersion === 'number'
+						? rawNode.currentVersion
+						: revList[revList.length - 1]?.version ?? 1,
+				provenance: provList,
+				revisions: revList,
+				historyExpanded: false,
+				activeProvenanceIndex: 0
+			};
+		}
+		return rawNode;
+	}
+
 	// Load / Save canvas state per conversation
 	function loadCanvasState(key: string) {
 		if (!browser) return;
@@ -925,7 +1033,7 @@
 				customEdges = getDefaultStarterEdges();
 				nodePositions = {};
 				turnAssociations = {};
-
+				provenanceNavigation.setKnowledgeNodes(customNodes);
 				return;
 			}
 
@@ -938,11 +1046,13 @@
 			turnAssociations = parsed.turnAssociations ?? {};
 			customNodes =
 				Array.isArray(parsed.customNodes) && parsed.customNodes.length > 0
-					? parsed.customNodes
+					? parsed.customNodes.map(normalizeCustomNode)
 					: getDefaultStarterNodes();
 			customEdges = Array.isArray(parsed.customEdges)
 				? parsed.customEdges
 				: getDefaultStarterEdges();
+
+			provenanceNavigation.setKnowledgeNodes(customNodes);
 
 			// Auto-detect and fix legacy overlapping positions in turn nodes (< 540px vertical distance in same col)
 			if (Object.keys(nodePositions).length > 1) {
@@ -997,6 +1107,7 @@
 			};
 
 			localStorage.setItem(storageKey, JSON.stringify(payload));
+			provenanceNavigation.setKnowledgeNodes(customNodes);
 		} catch {
 			// If base64 images exceed localStorage quota, save lightweight layout metadata
 			try {
@@ -1020,6 +1131,7 @@
 				};
 
 				localStorage.setItem(storageKey, JSON.stringify(slimPayload));
+				provenanceNavigation.setKnowledgeNodes(customNodes);
 			} catch {
 				// Ignore quota errors
 			}
@@ -1027,12 +1139,528 @@
 	}
 
 	let lastLoadedKey = $state('');
+	let hydrateInFlight = false;
+
+	/**
+	 * Merge backend knowledge points/relations into the local canvas. Backend is the
+	 * single source of truth for knowledge content/versions; local storage keeps layout.
+	 */
+	async function hydrateFromBackend(): Promise<void> {
+		if (!browser || hydrateInFlight) return;
+		const conversation = conversationsStore.activeConversation;
+		if (!conversation?.id) return;
+
+		const courseId = getActiveCourseId();
+		hydrateInFlight = true;
+		try {
+			const headers = learningJsonHeaders();
+			const [kpRes, relRes] = await Promise.all([
+				fetch(`/api/courses/${encodeURIComponent(courseId)}/knowledge`, { headers }),
+				fetch(`/api/courses/${encodeURIComponent(courseId)}/knowledge/relations`, { headers })
+			]);
+			if (!kpRes.ok) return;
+
+			const kpData = (await kpRes.json()) as { knowledge_points?: BackendKnowledgePoint[] };
+			const kps = kpData.knowledge_points ?? [];
+			const relData = relRes.ok
+				? ((await relRes.json()) as { relations?: BackendRelation[] })
+				: { relations: [] as BackendRelation[] };
+			const relations = relData.relations ?? [];
+
+			if (kps.length === 0 && relations.length === 0) return;
+
+			const merged = mergeBackendKnowledgePoints(customNodes, kps, courseId);
+			if (merged.added > 0 || merged.updated > 0) {
+				customNodes = merged.nodes;
+				persistCanvasState();
+			}
+
+			if (relations.length > 0) {
+				const backendEdges = mapBackendRelationsToEdges(relations, customNodes);
+				const existing = new Set(
+					customEdges.map((e) => `${e.from}->${e.to}:${e.relType ?? 'default'}`)
+				);
+				const newEdges = backendEdges.filter(
+					(e) => !existing.has(`${e.from}->${e.to}:${e.relType ?? 'default'}`)
+				);
+				if (newEdges.length > 0) {
+					customEdges = [...customEdges, ...newEdges];
+					persistCanvasState();
+				}
+			}
+
+			if (merged.added > 0) {
+				toast.info(`已从后端补齐 ${merged.added} 个知识节点`);
+			}
+
+			// Retry knowledge nodes whose earlier backend write failed.
+			for (const node of customNodes.filter(
+				(n) => n.kind === 'knowledge' && n.syncPending
+			)) {
+				void persistKnowledgeNode(node, 'retry_sync');
+			}
+		} catch (err) {
+			console.warn('Canvas backend hydration skipped:', err);
+		} finally {
+			hydrateInFlight = false;
+		}
+	}
 
 	$effect(() => {
 		if (storageKey !== lastLoadedKey) {
 			lastLoadedKey = storageKey;
 			loadCanvasState(storageKey);
+			if (conversationsStore.activeConversation?.id) {
+				void hydrateFromBackend();
+			}
 		}
+	});
+
+	$effect(() => {
+		provenanceNavigation.setKnowledgeNodes(customNodes);
+	});
+
+	function focusCanvasNode(nodeId: string) {
+		if (!nodeId) return;
+
+		let targetX = 0;
+		let targetY = 0;
+		let targetWidth = 380;
+		let targetHeight = 260;
+
+		const cNode = customNodes.find((n) => n.id === nodeId);
+		if (cNode) {
+			targetX = cNode.x;
+			targetY = cNode.y;
+			targetWidth = cNode.width;
+		} else {
+			const turn = chatTurnNodes.find((t) => t.id === nodeId || t.assistantMessage?.id === nodeId);
+			if (turn) {
+				targetX = turn.x;
+				targetY = turn.y;
+				targetWidth = turn.width;
+				targetHeight = estimateTurnCardHeight(turn);
+			} else {
+				return;
+			}
+		}
+
+		const centerX = targetX + targetWidth / 2;
+		const centerY = targetY + targetHeight / 2;
+
+		if (zoom < 0.8) {
+			zoom = 0.95;
+		}
+
+		const vpWidth = viewportEl?.clientWidth || 1000;
+		const vpHeight = viewportEl?.clientHeight || 700;
+
+		panX = Math.round(vpWidth / 2 - centerX * zoom);
+		panY = Math.round(vpHeight / 2 - centerY * zoom);
+
+		isNavigating = true;
+		setTimeout(() => {
+			isNavigating = false;
+		}, 480);
+	}
+
+	function buildProvenanceDict(node: CustomCanvasNode): Record<string, unknown> | undefined {
+		const anchors = node.provenance ?? [];
+		if (anchors.length === 0) return undefined;
+		const primary = anchors[0];
+		return {
+			message_id: primary.messageId,
+			turn_index: primary.turnIndex,
+			doc_id: primary.docId,
+			chunk_id: primary.chunkId,
+			doc_title: primary.docTitle,
+			page_start: primary.pageStart,
+			page_end: primary.pageEnd,
+			quote_snippet: primary.quoteSnippet,
+			extra: {
+				all_anchors: anchors.map((a) => ({
+					id: a.id,
+					message_id: a.messageId,
+					turn_index: a.turnIndex,
+					doc_id: a.docId,
+					chunk_id: a.chunkId,
+					doc_title: a.docTitle,
+					page_start: a.pageStart,
+					page_end: a.pageEnd,
+					quote_snippet: a.quoteSnippet,
+					created_at: a.createdAt
+				}))
+			}
+		};
+	}
+
+	/** Adopt backend knowledge-point state (backend is the single source of versions). */
+	function adoptBackendKnowledge(node: CustomCanvasNode, kp: BackendKnowledgePoint): void {
+		if (!kp?.id) return;
+		node.knowledgePointId = kp.id;
+		node.courseId = kp.course_id || node.courseId || getActiveCourseId();
+		node.currentVersion = Number(kp.version) || node.currentVersion || 1;
+		const history = mapBackendHistoryToRevisions(kp.history, kp.name);
+		if (history.length > 0) node.revisions = history;
+		node.syncPending = false;
+	}
+
+	/** Persist a knowledge card to the backend, adopting the returned version/history. */
+	async function persistKnowledgeNode(node: CustomCanvasNode, changeType: string): Promise<boolean> {
+		savingNodeId = node.id;
+		const courseId = node.courseId || getActiveCourseId();
+		try {
+			const res = await fetch(`/api/courses/${encodeURIComponent(courseId)}/knowledge`, {
+				method: 'POST',
+				headers: learningJsonHeaders(),
+				body: JSON.stringify({
+					id: node.knowledgePointId,
+					user_id: getActiveUserId(),
+					name: node.title,
+					summary: node.title,
+					difficulty: node.difficulty ?? 0.5,
+					raw_quote: node.rawQuote || node.content,
+					content: node.content,
+					provenance: buildProvenanceDict(node),
+					prereq_ids: [],
+					change_type: changeType
+				})
+			});
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			const data = await res.json();
+			const kp = (data.knowledge_point ?? data) as BackendKnowledgePoint;
+			adoptBackendKnowledge(node, kp);
+			return true;
+		} catch (err) {
+			console.warn('Knowledge node backend sync failed:', err);
+			node.syncPending = true;
+			return false;
+		} finally {
+			savingNodeId = null;
+			persistCanvasState();
+		}
+	}
+
+	async function handleCreateKnowledgeNode(detail: {
+		title: string;
+		quoteSnippet: string;
+		messageId?: string;
+		turnIndex?: number;
+		courseId?: string;
+		docId?: string;
+		chunkId?: string;
+		docTitle?: string;
+		pageStart?: number;
+		pageEnd?: number;
+		difficulty?: number;
+		mastery?: number;
+	}) {
+		const originTurn = chatTurnNodes.find(
+			(t) =>
+				(detail.messageId && t.assistantMessage?.id === detail.messageId) ||
+				(detail.turnIndex && t.turnIndex === detail.turnIndex)
+		);
+
+		let targetX: number;
+		let targetY: number;
+
+		if (originTurn) {
+			targetX = originTurn.x + originTurn.width + 50;
+			const siblings = customNodes.filter(
+				(n) =>
+					n.linkedTurnId === originTurn.id ||
+					n.provenance?.some((p) => p.messageId === detail.messageId)
+			);
+			targetY = originTurn.y + siblings.length * 380;
+		} else {
+			const center = screenToWorld(
+				(viewportEl?.clientWidth || 1000) / 2,
+				(viewportEl?.clientHeight || 700) / 2
+			);
+			targetX = Math.round(center.x - 190 + (customNodes.length % 5) * 24);
+			targetY = Math.round(center.y - 140 + (customNodes.length % 5) * 24);
+		}
+
+		const anchor: ProvenanceAnchor = {
+			id: `prov-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+			messageId: detail.messageId,
+			turnIndex: detail.turnIndex,
+			docId: detail.docId,
+			chunkId: detail.chunkId,
+			docTitle: detail.docTitle,
+			pageStart: detail.pageStart,
+			pageEnd: detail.pageEnd,
+			quoteSnippet: detail.quoteSnippet,
+			createdAt: Date.now()
+		};
+
+		const revision: KnowledgeRevision = {
+			version: 1,
+			timestamp: Date.now(),
+			editor: 'extract',
+			changeType: 'initial',
+			summary: detail.turnIndex ? `初始从对话 #${detail.turnIndex} 提炼` : '初始划词提炼',
+			content: detail.quoteSnippet,
+			title: detail.title,
+			quoteSnippet: detail.quoteSnippet,
+			rawQuote: detail.quoteSnippet,
+			difficulty: detail.difficulty ?? 0.5
+		};
+
+		const newNodeId = `kn-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+		const newCard: CustomCanvasNode = {
+			id: newNodeId,
+			kind: 'knowledge',
+			courseId: detail.courseId || getActiveCourseId(),
+			syncPending: true,
+			title: detail.title,
+			content: detail.quoteSnippet,
+			rawQuote: detail.quoteSnippet,
+			color: 'emerald',
+			width: 380,
+			x: targetX,
+			y: targetY,
+			difficulty: detail.difficulty ?? 0.5,
+			mastery: detail.mastery ?? 0.3,
+			currentVersion: 1,
+			linkedTurnId: originTurn?.id,
+			provenance: [anchor],
+			revisions: [revision],
+			historyExpanded: false,
+			activeProvenanceIndex: 0
+		};
+
+		customNodes = [...customNodes, newCard];
+
+		if (originTurn) {
+			customEdges = [
+				...customEdges,
+				{
+					id: `edge-extract-${Date.now()}`,
+					from: originTurn.id,
+					to: newNodeId,
+					label: '知识提炼',
+					isAuto: true
+				}
+			];
+		}
+
+		persistCanvasState();
+		focusCanvasNode(newNodeId);
+
+		const created = customNodes.find((n) => n.id === newNodeId);
+		if (created) {
+			const ok = await persistKnowledgeNode(created, 'create');
+			toast[ok ? 'success' : 'warning'](
+				ok ? `已保存知识节点「${created.title}」` : `知识节点「${created.title}」已本地暂存，后端同步稍后重试`
+			);
+		}
+	}
+
+	async function handleAppendKnowledgeNode(detail: {
+		targetNodeId: string;
+		courseId?: string;
+		quoteSnippet: string;
+		messageId?: string;
+		turnIndex?: number;
+		docId?: string;
+		chunkId?: string;
+		docTitle?: string;
+		pageStart?: number;
+		pageEnd?: number;
+	}) {
+		const idx = customNodes.findIndex((n) => n.id === detail.targetNodeId);
+		if (idx === -1) return;
+
+		const target = customNodes[idx];
+		const anchor: ProvenanceAnchor = {
+			id: `prov-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+			messageId: detail.messageId,
+			turnIndex: detail.turnIndex,
+			docId: detail.docId,
+			chunkId: detail.chunkId,
+			docTitle: detail.docTitle,
+			pageStart: detail.pageStart,
+			pageEnd: detail.pageEnd,
+			quoteSnippet: detail.quoteSnippet,
+			createdAt: Date.now()
+		};
+
+		const nextVersion = (target.currentVersion ?? 1) + 1;
+		const revision: KnowledgeRevision = {
+			version: nextVersion,
+			timestamp: Date.now(),
+			editor: 'extract',
+			changeType: 'append_quote',
+			summary: detail.turnIndex ? `追加来自对话 #${detail.turnIndex} 的引用` : '追加引用片段',
+			content: target.content,
+			title: target.title,
+			quoteSnippet: detail.quoteSnippet,
+			rawQuote: detail.quoteSnippet,
+			difficulty: target.difficulty ?? 0.5
+		};
+
+		target.rawQuote = target.rawQuote
+			? `${target.rawQuote}\n\n---\n\n${detail.quoteSnippet}`
+			: detail.quoteSnippet;
+		target.provenance = [...(target.provenance ?? []), anchor];
+		target.revisions = [...(target.revisions ?? []), revision];
+		target.currentVersion = nextVersion;
+		target.activeProvenanceIndex = (target.provenance.length || 1) - 1;
+		if (detail.courseId) target.courseId = detail.courseId;
+
+		persistCanvasState();
+		focusCanvasNode(target.id);
+
+		const ok = await persistKnowledgeNode(target, 'append_quote');
+		toast[ok ? 'success' : 'warning'](
+			ok ? `已追加引用到「${target.title}」并同步后端` : `引用已本地追加，「${target.title}」后端同步稍后重试`
+		);
+	}
+
+	function handleKnowledgeNodeBlur(node: CustomCanvasNode) {
+		const lastRev = node.revisions?.[node.revisions.length - 1];
+		if (lastRev && lastRev.content === node.content && lastRev.title === node.title) {
+			persistCanvasState();
+			return;
+		}
+
+		const nextVersion = (node.currentVersion ?? 1) + 1;
+		const revision: KnowledgeRevision = {
+			version: nextVersion,
+			timestamp: Date.now(),
+			editor: 'user',
+			changeType: 'edit_content',
+			summary: '更新概念笔记与思考',
+			content: node.content,
+			title: node.title,
+			difficulty: node.difficulty ?? 0.5
+		};
+
+		node.revisions = [...(node.revisions ?? []), revision];
+		node.currentVersion = nextVersion;
+		persistCanvasState();
+
+		void persistKnowledgeNode(node, 'edit_content');
+	}
+
+	async function handleKnowledgeRollback(node: CustomCanvasNode, targetRev: KnowledgeRevision) {
+		node.title = targetRev.title ?? node.title;
+		node.content = targetRev.content;
+		if (targetRev.difficulty !== undefined) {
+			node.difficulty = targetRev.difficulty;
+		}
+
+		const nextVersion = (node.currentVersion ?? 1) + 1;
+		const rollbackRev: KnowledgeRevision = {
+			version: nextVersion,
+			timestamp: Date.now(),
+			editor: 'user',
+			changeType: 'revert',
+			summary: `回退至版本 v${targetRev.version}`,
+			content: node.content,
+			title: node.title,
+			difficulty: node.difficulty ?? 0.5
+		};
+
+		node.revisions = [...(node.revisions ?? []), rollbackRev];
+		node.currentVersion = nextVersion;
+		node.historyExpanded = false;
+		persistCanvasState();
+
+		const courseId = node.courseId || getActiveCourseId();
+		if (node.knowledgePointId) {
+			try {
+				const res = await fetch(
+					`/api/courses/${encodeURIComponent(courseId)}/knowledge/${encodeURIComponent(node.knowledgePointId)}/rollback`,
+					{
+						method: 'POST',
+						headers: learningJsonHeaders(),
+						body: JSON.stringify({ target_version: targetRev.version })
+					}
+				);
+				if (res.ok) {
+					const data = await res.json();
+					adoptBackendKnowledge(node, (data.knowledge_point ?? data) as BackendKnowledgePoint);
+					persistCanvasState();
+					toast.success(`已回退知识节点「${node.title}」至 v${targetRev.version}`);
+					return;
+				}
+				console.warn('Backend rollback rejected:', res.status);
+			} catch (err) {
+				console.warn('Backend rollback sync warning:', err);
+			}
+		}
+
+		// Backend offline or version mismatch: persist the rolled-back content as a new edit.
+		node.syncPending = true;
+		const ok = await persistKnowledgeNode(node, `rollback_to_v${targetRev.version}`);
+		toast[ok ? 'success' : 'warning'](
+			ok
+				? `已回退知识节点「${node.title}」至 v${targetRev.version}`
+				: `已本地回退「${node.title}」至 v${targetRev.version}，后端同步稍后重试`
+		);
+	}
+	function convertKnowledgeToFlashcard(node: CustomCanvasNode) {
+		const newFlashcardId = `flash-${Date.now()}`;
+		const quote = node.provenance?.[0]?.quoteSnippet || node.rawQuote || '';
+		const back = quote ? `${node.content}\n\n---\n**原文出处**：\n> ${quote}` : node.content;
+
+		const flashCard: CustomCanvasNode = {
+			id: newFlashcardId,
+			kind: 'flashcard',
+			title: `🧠 闪卡：${node.title}`,
+			content: `什么是「${node.title}」？请尝试回忆其核心定义与要点。`,
+			backContent: back,
+			color: 'violet',
+			width: 360,
+			x: node.x + node.width + 40,
+			y: node.y,
+			flipped: false,
+			sm2Interval: 1,
+			sm2Easiness: 2.5
+		};
+
+		customNodes = [...customNodes, flashCard];
+		customEdges = [
+			...customEdges,
+			{
+				id: `edge-kn-flash-${Date.now()}`,
+				from: node.id,
+				to: newFlashcardId,
+				label: '记忆强化',
+				isAuto: true
+			}
+		];
+		persistCanvasState();
+		toast.success(`已生成复习闪卡并与「${node.title}」关联`);
+	}
+
+	onMount(() => {
+		provenanceNavigation.setKnowledgeNodes(customNodes);
+
+		const handleCreateNodeEvent = (e: Event) => {
+			const customEvent = e as CustomEvent;
+			handleCreateKnowledgeNode(customEvent.detail);
+		};
+		const handleAppendNodeEvent = (e: Event) => {
+			const customEvent = e as CustomEvent;
+			handleAppendKnowledgeNode(customEvent.detail);
+		};
+		const handleFocusNodeEvent = (e: Event) => {
+			const customEvent = e as CustomEvent<{ nodeId: string }>;
+			focusCanvasNode(customEvent.detail.nodeId);
+		};
+
+		document.addEventListener('canvas:create-knowledge-node', handleCreateNodeEvent);
+		document.addEventListener('canvas:append-to-knowledge-node', handleAppendNodeEvent);
+		document.addEventListener('provenance-focus-canvas-node', handleFocusNodeEvent);
+
+		return () => {
+			document.removeEventListener('canvas:create-knowledge-node', handleCreateNodeEvent);
+			document.removeEventListener('canvas:append-to-knowledge-node', handleAppendNodeEvent);
+			document.removeEventListener('provenance-focus-canvas-node', handleFocusNodeEvent);
+		};
 	});
 
 	function screenToWorld(clientX: number, clientY: number): { x: number; y: number } {
@@ -1158,6 +1786,75 @@
 		connectingMouseWorld = screenToWorld(event.clientX, event.clientY);
 	}
 
+	async function syncRelationToBackend(edge: CanvasEdge, isDelete = false) {
+		const fromNode = customNodes.find((n) => n.id === edge.from);
+		const toNode = customNodes.find((n) => n.id === edge.to);
+
+		const srcId = fromNode?.knowledgePointId;
+		const dstId = toNode?.knowledgePointId;
+		const relType = edge.relType;
+		const courseId = fromNode?.courseId || getActiveCourseId();
+
+		if (!relType) return;
+		// Only sync edges between persisted knowledge points; title/local ids would
+		// create dangling garbage rows in the backend graph.
+		if (!srcId || !dstId) {
+			if (!isDelete) {
+				toast.info('两端都需为已保存的知识节点，才能同步语义关系到后端');
+			}
+			return;
+		}
+
+		try {
+			if (isDelete) {
+				await fetch(
+					`/api/courses/${encodeURIComponent(courseId)}/knowledge/relations?src_id=${encodeURIComponent(srcId)}&rel_type=${encodeURIComponent(relType)}&dst_id=${encodeURIComponent(dstId)}`,
+					{ method: 'DELETE', headers: learningJsonHeaders() }
+				);
+			} else {
+				await fetch(`/api/courses/${encodeURIComponent(courseId)}/knowledge/relations`, {
+					body: JSON.stringify({
+						dst_id: dstId,
+						metadata: { edge_id: edge.id },
+						rel_type: relType,
+						src_id: srcId
+					}),
+					headers: learningJsonHeaders(),
+					method: 'POST'
+				});
+			}
+		} catch (err) {
+			console.warn('Backend relation sync skipped:', err);
+		}
+	}
+
+	async function cycleOrSetEdgeRelation(edgeId: string) {
+		const idx = customEdges.findIndex((e) => e.id === edgeId);
+		if (idx === -1) return;
+
+		const current = (customEdges[idx].relType || 'default') as SemanticRelationType;
+		const types: SemanticRelationType[] = [
+			'prerequisite',
+			'causal',
+			'similar',
+			'branch_followup',
+			'default'
+		];
+
+		const targetType = types[(types.indexOf(current) + 1) % types.length];
+		const cfg = RELATION_CONFIG[targetType];
+
+		customEdges[idx] = {
+			...customEdges[idx],
+			label: cfg.label,
+			relType: targetType === 'default' ? undefined : (targetType as CanvasEdge['relType'])
+		};
+
+		persistCanvasState();
+		toast.success(`连线关系已切换为：【${cfg.label}】`);
+		void syncRelationToBackend(customEdges[idx]);
+	}
+
 	function completeConnection(targetNodeId: string, event: MouseEvent) {
 		event.stopPropagation();
 
@@ -1174,26 +1871,106 @@
 		);
 
 		if (!exists) {
-			customEdges = [
-				...customEdges,
-				{
-					from: connectingFromId,
-					id: `edge-${Date.now()}`,
-					label: '关联',
-					to: targetNodeId
-				}
-			];
+			const fromNode = customNodes.find((n) => n.id === connectingFromId);
+			const toNode = customNodes.find((n) => n.id === targetNodeId);
+			const isKnowledge = fromNode?.kind === 'knowledge' || toNode?.kind === 'knowledge';
+			const initialRelType: SemanticRelationType = isKnowledge ? 'prerequisite' : 'default';
+			const cfg = RELATION_CONFIG[initialRelType];
+
+			const newEdge: CanvasEdge = {
+				from: connectingFromId,
+				id: `edge-${Date.now()}`,
+				label: cfg.label,
+				relType: initialRelType === 'default' ? undefined : (initialRelType as CanvasEdge['relType']),
+				to: targetNodeId
+			};
+
+			customEdges = [...customEdges, newEdge];
 			persistCanvasState();
-			toast.success('已建立节点关联连线');
+			toast.success(`已建立连线：【${cfg.label}】（点击连线标签可切换类型）`);
+			void syncRelationToBackend(newEdge);
 		}
 
 		connectingFromId = null;
 	}
 
 	function removeEdge(edgeId: string) {
+		const edge = customEdges.find((e) => e.id === edgeId);
+		if (edge) {
+			void syncRelationToBackend(edge, true);
+		}
 		customEdges = customEdges.filter((e) => e.id !== edgeId);
 		persistCanvasState();
 	}
+
+	async function handleKnowledgeBranchFollowup(node: CustomCanvasNode) {
+		const provList = node.provenance ?? [];
+		const activeProvIdx = Math.min(
+			node.activeProvenanceIndex ?? 0,
+			Math.max(0, provList.length - 1)
+		);
+		const anchor = provList[activeProvIdx] || provList[0];
+		if (anchor?.messageId) {
+			try {
+				await conversationsStore.updateCurrentNode(anchor.messageId);
+				await conversationsStore.refreshActiveMessages();
+			} catch (e) {
+				console.warn('Branch switch error', e);
+			}
+		}
+
+		const docRef = anchor?.docTitle
+			? `[出处: ${anchor.docTitle}${anchor.pageStart ? ` P.${anchor.pageStart}` : ''}]`
+			: '';
+		const excerpt = node.rawQuote || anchor?.quoteSnippet || '';
+		const prompt = `【基于知识节点「${node.title}」展开分支追问】\n${docRef ? `${docRef}\n` : ''}${excerpt ? `> 依据摘录：${excerpt.slice(0, 160)}\n` : ''}- 核心要点：${node.content.slice(0, 180)}\n\n我的追问：`;
+
+		injectIntoChat(prompt);
+		pendingBranchSourceNodeId = node.id;
+		toast.success(
+			`已锚定至「${node.title}」所处对话分支（原分支完整保留），发送提问后将自动生成独立学习分支！`
+		);
+	}
+
+	async function handleTurnBranchFollowup(turn: ChatTurnNode) {
+		const anchorId = turn.assistantMessage?.id || turn.userMessage?.id;
+		if (anchorId) {
+			try {
+				await conversationsStore.updateCurrentNode(anchorId);
+				await conversationsStore.refreshActiveMessages();
+			} catch (e) {
+				console.warn('Turn branch switch error', e);
+			}
+		}
+		const prompt = `【围绕对话 #${turn.turnIndex} 开启新分支追问】\n原问题：${turn.userMessage?.content || ''}\n进一步追问：`;
+		injectIntoChat(prompt);
+		pendingBranchSourceNodeId = turn.id;
+		toast.success(`已锚定至对话 #${turn.turnIndex} 历史分支（后续原分支完整保留）！`);
+	}
+
+	$effect(() => {
+		if (pendingBranchSourceNodeId && chatTurnNodes.length > 0) {
+			const latestTurn = chatTurnNodes[chatTurnNodes.length - 1];
+			if (latestTurn.id !== pendingBranchSourceNodeId) {
+				const exists = customEdges.some(
+					(e) => e.from === pendingBranchSourceNodeId && e.to === latestTurn.id
+				);
+				if (!exists) {
+					const newEdge: CanvasEdge = {
+						from: pendingBranchSourceNodeId,
+						id: `edge-branch-${Date.now()}`,
+						label: '分支追问',
+						relType: 'branch_followup',
+						to: latestTurn.id
+					};
+					customEdges = [...customEdges, newEdge];
+					persistCanvasState();
+					void syncRelationToBackend(newEdge);
+				}
+				pendingBranchSourceNodeId = null;
+			}
+		}
+	});
 
 	// Toolbar Actions: Add nodes
 	function addNoteCard(prefillTitle = '📝 新建便签笔记', prefillContent = '', linkFromId?: string) {
@@ -1348,10 +2125,35 @@
 		persistCanvasState();
 	}
 
-	function deleteCustomNode(nodeId: string) {
+	async function deleteCustomNode(nodeId: string) {
+		const node = customNodes.find((n) => n.id === nodeId);
+		if (!node) return;
+
+		if (node.kind === 'knowledge' && node.knowledgePointId) {
+			if (!confirm(`确定删除知识节点「${node.title}」吗？后端知识点与复习记录会一并删除。`)) {
+				return;
+			}
+			const courseId = node.courseId || getActiveCourseId();
+			try {
+				const res = await fetch(
+					`/api/courses/${encodeURIComponent(courseId)}/knowledge/${encodeURIComponent(node.knowledgePointId)}`,
+					{ method: 'DELETE', headers: learningJsonHeaders() }
+				);
+				if (!res.ok && res.status !== 404) {
+					toast.error(`后端删除失败（HTTP ${res.status}），节点已保留`);
+					return;
+				}
+			} catch (err) {
+				console.warn('Backend knowledge delete failed:', err);
+				toast.error('后端删除失败，节点已保留');
+				return;
+			}
+		}
+
 		customNodes = customNodes.filter((n) => n.id !== nodeId);
 		customEdges = customEdges.filter((e) => e.from !== nodeId && e.to !== nodeId);
 		persistCanvasState();
+		toast.success('已删除画布节点');
 	}
 
 	function cycleNodeColor(nodeId: string) {
@@ -1427,9 +2229,9 @@
 		customNodes[idx].ragLoading = true;
 
 		try {
-			const res = await fetch(`${base}/api/v1/rag/search`, {
-				body: JSON.stringify({ query, top_k: 3 }),
-				headers: { 'Content-Type': 'application/json' },
+			const res = await fetch('/api/v1/rag/search', {
+				body: JSON.stringify({ query, namespace: getActiveRagNamespace(), top_k: 3 }),
+				headers: learningJsonHeaders(),
 				method: 'POST'
 			});
 
@@ -1439,10 +2241,16 @@
 			const items = Array.isArray(data.results) ? data.results : [];
 
 			customNodes[idx].ragResults = items.map(
-				(r: { content?: string; text?: string; metadata?: { source?: string }; score?: number }) => ({
+				(r: {
+					content?: string;
+					text?: string;
+					filename?: string;
+					metadata?: { source?: string; filename?: string };
+					score?: number;
+				}) => ({
 					content: (r.content ?? r.text ?? '').slice(0, 280),
 					score: typeof r.score === 'number' ? r.score : 0,
-					source: r.metadata?.source ?? '本地知识库'
+					source: r.filename ?? r.metadata?.filename ?? r.metadata?.source ?? '本地知识库'
 				})
 			);
 
@@ -1805,6 +2613,7 @@
 		<!-- Transformed World Layer -->
 		<div
 			class="canvas-world-layer pointer-events-none absolute top-0 left-0 origin-top-left"
+			class:canvas-world-layer--navigating={isNavigating}
 			style="transform: translate3d({panX}px, {panY}px, 0) scale({zoom}); width: 4000px; height: 3000px;"
 		>
 			<!-- SVG Bezier Connections Layer -->
@@ -1824,6 +2633,50 @@
 					>
 						<path d="M 0 1 L 7 4 L 0 7 z" fill="currentColor" class="text-primary/55" />
 					</marker>
+					<marker
+						id="canvas-arrow-sky"
+						markerHeight="8"
+						markerWidth="8"
+						orient="auto-start-reverse"
+						refX="7"
+						refY="4"
+						viewBox="0 0 8 8"
+					>
+						<path d="M 0 1 L 7 4 L 0 7 z" fill="#0284c7" />
+					</marker>
+					<marker
+						id="canvas-arrow-amber"
+						markerHeight="8"
+						markerWidth="8"
+						orient="auto-start-reverse"
+						refX="7"
+						refY="4"
+						viewBox="0 0 8 8"
+					>
+						<path d="M 0 1 L 7 4 L 0 7 z" fill="#d97706" />
+					</marker>
+					<marker
+						id="canvas-arrow-purple"
+						markerHeight="8"
+						markerWidth="8"
+						orient="auto-start-reverse"
+						refX="7"
+						refY="4"
+						viewBox="0 0 8 8"
+					>
+						<path d="M 0 1 L 7 4 L 0 7 z" fill="#9333ea" />
+					</marker>
+					<marker
+						id="canvas-arrow-emerald"
+						markerHeight="8"
+						markerWidth="8"
+						orient="auto-start-reverse"
+						refX="7"
+						refY="4"
+						viewBox="0 0 8 8"
+					>
+						<path d="M 0 1 L 7 4 L 0 7 z" fill="#059669" />
+					</marker>
 				</defs>
 
 				{#each allEdges as edge (edge.id)}
@@ -1837,32 +2690,44 @@
 						{@const pathD = computeBezierPath(x1, y1, x2, y2)}
 						{@const midX = (x1 + x2) / 2}
 						{@const midY = (y1 + y2) / 2}
+						{@const relCfg = RELATION_CONFIG[edge.relType || 'default']}
 						<g class="group/edge pointer-events-auto">
 							<path
-								class="stroke-primary/40 group-hover/edge:stroke-primary transition-colors"
+								class="{relCfg.stroke} group-hover/edge:opacity-100 transition-colors"
 								d={pathD}
 								fill="none"
-								marker-end="url(#canvas-arrow)"
-								stroke-dasharray={edge.isAuto ? '6 4' : undefined}
+								marker-end={relCfg.marker}
+								stroke-dasharray={edge.isAuto ? '6 4' : (relCfg.dash || undefined)}
 								stroke-width="2.2"
 							/>
-							{#if edge.label}
-								<g transform="translate({midX}, {midY})">
+							{#if edge.label || !edge.isAuto}
+								<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+								<g
+									class={!edge.isAuto ? 'cursor-pointer select-none' : 'pointer-events-none select-none'}
+									onclick={() => !edge.isAuto && cycleOrSetEdgeRelation(edge.id)}
+									onkeydown={(e) => !edge.isAuto && e.key === 'Enter' && cycleOrSetEdgeRelation(edge.id)}
+									role={!edge.isAuto ? 'button' : undefined}
+									tabindex={!edge.isAuto ? 0 : undefined}
+									transform="translate({midX}, {midY})"
+								>
+									{#if !edge.isAuto}
+										<title>点击切换连线关系类型（前置知识 / 因果 / 相似 / 分支追问 / 关联）</title>
+									{/if}
 									<rect
-										class="fill-background/90 stroke-border"
-										height="20"
+										class="{relCfg.bg} {relCfg.border} transition-colors"
+										height="22"
 										rx="6"
-										stroke-width="1"
-										width="58"
-										x="-29"
-										y="-10"
+										stroke-width="1.2"
+										width="64"
+										x="-32"
+										y="-11"
 									/>
 									<text
-										class="fill-muted-foreground text-[10px] font-medium"
+										class="{relCfg.color} text-[10px] font-semibold"
 										dominant-baseline="middle"
 										text-anchor="middle"
 									>
-										{edge.label}
+										{edge.label || relCfg.label}
 									</text>
 								</g>
 							{/if}
@@ -1873,8 +2738,9 @@
 									onkeydown={(e) => e.key === 'Enter' && removeEdge(edge.id)}
 									role="button"
 									tabindex="0"
-									transform="translate({midX + 36}, {midY})"
+									transform="translate({midX + 40}, {midY})"
 								>
+									<title>删除此连线</title>
 									<circle class="fill-destructive" cx="0" cy="0" r="8" />
 									<text
 										class="fill-destructive-foreground text-[10px] font-bold"
@@ -1906,12 +2772,16 @@
 				{/if}
 			</svg>
 
-			<!-- 1. Custom Cards (Hub, Sticky Notes, Image Gallery Cards, RAG Search Cards, SM-2 Flashcards) -->
+			<!-- 1. Custom Cards (Hub, Sticky Notes, Image Gallery Cards, RAG Search Cards, SM-2 Flashcards, Knowledge Cards) -->
 			{#each customNodes as node (node.id)}
 				{@const style = CARD_COLOR_STYLES[node.color]}
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<div
+					data-node-id={node.id}
+					data-node-kind={node.kind}
+					data-knowledge-point-id={node.knowledgePointId ?? ''}
 					class="canvas-node-card pointer-events-auto absolute flex flex-col rounded-2xl border bg-background/95 shadow-md backdrop-blur-md transition-shadow hover:shadow-lg {style.border}"
+					class:canvas-spotlight-active={provenanceNavigation.spotlightNodeId === node.id}
 					style="left: {node.x}px; top: {node.y}px; width: {node.width}px;"
 					onmouseup={(e) => connectingFromId && completeConnection(node.id, e)}
 				>
@@ -1950,6 +2820,18 @@
 						/>
 
 						<div class="flex shrink-0 items-center gap-1">
+							{#if node.kind === 'knowledge'}
+								<button
+									type="button"
+									class="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/20 transition-colors cursor-pointer"
+									onclick={() => (node.historyExpanded = !node.historyExpanded)}
+									title="查看版本历史快照与一键回退"
+								>
+									<span>v{node.currentVersion ?? 1}</span>
+									<span class="text-primary/70">· 历史</span>
+								</button>
+							{/if}
+
 							{#if node.kind === 'image' && node.linkedTurnId}
 								<button
 									class="rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/20"
@@ -2278,6 +3160,237 @@
 									</button>
 								</div>
 							{/if}
+						{:else if node.kind === 'knowledge'}
+							{@const provList = node.provenance ?? []}
+							{@const activeProvIdx = Math.min(node.activeProvenanceIndex ?? 0, Math.max(0, provList.length - 1))}
+							{@const currentAnchor = provList[activeProvIdx]}
+
+							<!-- ZONE 1: Immutable Quoted Excerpt Zone -->
+							<div class="relative flex flex-col gap-2 rounded-xl border border-primary/25 bg-muted/30 p-3 shadow-inner">
+								<!-- Multiple provenance tabs if more than 1 -->
+								{#if provList.length > 1}
+									<div class="flex flex-wrap items-center gap-1 border-b border-border/40 pb-1.5 mb-0.5">
+										<span class="text-[10px] text-muted-foreground mr-1">出处片段:</span>
+										{#each provList as prov, pIdx (prov.id || pIdx)}
+											<button
+												type="button"
+												class="rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors {activeProvIdx === pIdx ? 'bg-primary text-primary-foreground font-semibold' : 'bg-muted text-muted-foreground hover:bg-accent'}"
+												onclick={() => { node.activeProvenanceIndex = pIdx; persistCanvasState(); }}
+											>
+												引用 {pIdx + 1}{prov.turnIndex ? ` (#${prov.turnIndex})` : ''}
+											</button>
+										{/each}
+									</div>
+								{/if}
+
+								<!-- Provenance Badges Row -->
+								<div class="flex flex-wrap items-center gap-1.5">
+									{#if currentAnchor?.turnIndex || currentAnchor?.messageId}
+										<button
+											type="button"
+											class="inline-flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-700 dark:text-sky-300 hover:bg-sky-500/20 transition-colors cursor-pointer"
+											onclick={() => {
+												if (currentAnchor.messageId) {
+													void provenanceNavigation.scrollToChatMessage(currentAnchor.messageId);
+												}
+											}}
+											title="点击跳转并高亮左侧对话消息"
+										>
+											<MessageSquare class="h-3 w-3 text-sky-500" />
+											<span>对话 #{currentAnchor.turnIndex ?? 1}</span>
+										</button>
+									{/if}
+
+									{#if currentAnchor?.docTitle || currentAnchor?.pageStart}
+										<button
+											type="button"
+											class="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/20 transition-colors cursor-pointer"
+											onclick={() => {
+												provenanceNavigation.openTextbookPreview({
+													docId: currentAnchor.docId,
+													namespace: getActiveRagNamespace(),
+													docTitle: currentAnchor.docTitle || '参考教材',
+													pageStart: currentAnchor.pageStart || 1,
+													pageEnd: currentAnchor.pageEnd,
+													quoteSnippet: currentAnchor.quoteSnippet
+												});
+											}}
+											title="点击在内嵌预览中查看教材原文对应物理页"
+										>
+											<BookOpen class="h-3 w-3 text-emerald-500" />
+											<span>
+												{currentAnchor.docTitle || '教材'} P.{currentAnchor.pageStart ?? 1}{currentAnchor.pageEnd && currentAnchor.pageEnd !== currentAnchor.pageStart ? `-${currentAnchor.pageEnd}` : ''}
+											</span>
+										</button>
+									{/if}
+								</div>
+
+								<!-- Immutable Blockquote Quote Text -->
+								<blockquote
+									class="border-l-3 border-primary/60 bg-primary/5 py-1.5 px-2.5 rounded-r-md font-serif italic text-xs leading-relaxed text-foreground/90 select-text break-words"
+								>
+									“{currentAnchor?.quoteSnippet || node.rawQuote || node.content}”
+								</blockquote>
+							</div>
+
+							<!-- ZONE 2: Editable Analysis & Study Zone -->
+							<div class="flex flex-col gap-2 pt-1">
+								<div class="space-y-1">
+									<span class="text-[10px] font-medium text-muted-foreground block">概念标题</span>
+									<input
+										bind:value={node.title}
+										class="w-full rounded-lg border border-border/60 bg-background/80 px-2.5 py-1 text-xs font-semibold text-foreground focus:border-primary focus:outline-hidden"
+										onblur={() => handleKnowledgeNodeBlur(node)}
+										placeholder="输入概念名称…"
+									/>
+								</div>
+
+								<div class="space-y-1">
+									<div class="flex items-center justify-between">
+										<span class="text-[10px] font-medium text-muted-foreground">学习笔记与思考解析 (Markdown)</span>
+										<span class="text-[10px] text-muted-foreground/60">失焦自动生成新版本</span>
+									</div>
+									<textarea
+										bind:value={node.content}
+										rows="3"
+										class="w-full resize-y rounded-lg border border-border/60 bg-background/60 p-2 text-xs leading-relaxed text-foreground placeholder:text-muted-foreground/50 focus:border-primary/50 focus:outline-hidden"
+										onblur={() => handleKnowledgeNodeBlur(node)}
+										placeholder="在此记录推导过程、易错点或补充示例…"
+									></textarea>
+								</div>
+
+								<!-- Difficulty & Mastery Bar -->
+								<div class="flex items-center justify-between text-[11px] pt-1.5 border-t border-border/40">
+									<div class="flex items-center gap-1">
+										<span class="text-[10px] text-muted-foreground">难度:</span>
+										{#each [{ label: '基础', val: 0.3 }, { label: '中等', val: 0.5 }, { label: '难点', val: 0.8 }] as d}
+											<button
+												type="button"
+												class="rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors cursor-pointer {(node.difficulty ?? 0.5) === d.val ? 'bg-primary text-primary-foreground font-semibold' : 'bg-muted text-muted-foreground hover:bg-accent'}"
+												onclick={() => {
+													node.difficulty = d.val;
+													persistCanvasState();
+												}}
+											>
+												{d.label} {d.val}
+											</button>
+										{/each}
+									</div>
+
+									<div class="flex items-center gap-1.5">
+										<span class="text-[10px] text-muted-foreground">掌握度: {Math.round((node.mastery ?? 0.3) * 100)}%</span>
+										<div class="h-1.5 w-12 rounded-full bg-muted overflow-hidden">
+											<div
+												class="h-full bg-emerald-500 transition-all duration-300"
+												style="width: {Math.round((node.mastery ?? 0.3) * 100)}%"
+											></div>
+										</div>
+									</div>
+								</div>
+
+								<!-- Bottom Action Buttons -->
+								<div class="flex flex-wrap items-center justify-between gap-1 pt-1.5 border-t border-border/40">
+									<Button
+										class="h-6 gap-1 px-2 text-[11px]"
+										onclick={() => handleKnowledgeBranchFollowup(node)}
+										size="sm"
+										variant="ghost"
+										title="以此知识点锚定原对话分支并展开深度追问（原分支完整保留）"
+									>
+										<Sparkles class="h-3 w-3 text-emerald-500" />
+										<span>分支追问</span>
+									</Button>
+
+									<Button
+										class="h-6 gap-1 px-2 text-[11px]"
+										onclick={() => convertKnowledgeToFlashcard(node)}
+										size="sm"
+										variant="outline"
+										title="将此知识点转化为记忆闪卡"
+									>
+										<Brain class="h-3 w-3 text-violet-500" />
+										<span>转为复习闪卡</span>
+									</Button>
+
+									<Button
+										class="h-6 gap-1 px-2 text-[11px]"
+										disabled={savingNodeId === node.id}
+										onclick={() => {
+											void persistKnowledgeNode(node, 'manual_sync').then((ok) => {
+												toast[ok ? 'success' : 'warning'](
+													ok
+														? `已同步知识节点「${node.title}」至后端`
+														: '后端同步失败，已本地暂存（下次编辑/加载时重试）'
+												);
+											});
+										}}
+										size="sm"
+										variant="ghost"
+										title="同步至后端知识库"
+									>
+										{#if savingNodeId === node.id}
+											<Loader2 class="h-3 w-3 animate-spin" />
+										{:else}
+											<Save class="h-3 w-3 text-primary" />
+										{/if}
+										<span>同步保存</span>
+									</Button>
+								</div>
+
+								<!-- Revision History Drawer -->
+								{#if node.historyExpanded}
+									<div class="mt-2 rounded-xl border border-primary/20 bg-background/90 p-2.5 shadow-md space-y-2">
+										<div class="flex items-center justify-between border-b border-border/50 pb-1">
+											<span class="text-[11px] font-semibold text-foreground flex items-center gap-1">
+												<span>📜 版本历史快照</span>
+												<span class="text-[10px] text-muted-foreground font-normal">(共 {(node.revisions ?? []).length} 版)</span>
+											</span>
+											<button
+												type="button"
+												class="text-[10px] text-muted-foreground hover:text-foreground cursor-pointer"
+												onclick={() => (node.historyExpanded = false)}
+											>
+												收起 ✕
+											</button>
+										</div>
+
+										<div class="max-h-48 overflow-y-auto space-y-2 pr-1">
+											{#each (node.revisions ?? []).slice().reverse() as rev (rev.version)}
+												<div class="rounded-lg border border-border/60 bg-muted/30 p-2 text-[11px]">
+													<div class="flex items-center justify-between mb-1">
+														<div class="flex items-center gap-1.5">
+															<span class="font-mono font-bold text-primary">v{rev.version}</span>
+															<span class="text-[10px] text-muted-foreground">
+																{new Date(rev.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+															</span>
+															<span class="rounded bg-primary/10 px-1 py-0.2 text-[9px] font-medium text-primary">
+																{rev.changeType}
+															</span>
+														</div>
+														{#if rev.version !== (node.currentVersion ?? 1)}
+															<button
+																type="button"
+																class="rounded bg-primary/15 hover:bg-primary/25 px-1.5 py-0.5 text-[10px] font-medium text-primary transition-colors cursor-pointer"
+																onclick={() => handleKnowledgeRollback(node, rev)}
+															>
+																回退至此版本
+															</button>
+														{:else}
+															<span class="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium">当前版本</span>
+														{/if}
+													</div>
+													<div class="text-[10px] text-muted-foreground mb-1">
+														{rev.summary}
+													</div>
+													<div class="line-clamp-2 text-[11px] text-foreground/80 font-mono bg-background/50 rounded p-1">
+														{rev.content || '空内容'}
+													</div>
+												</div>
+											{/each}
+										</div>
+									</div>
+								{/if}
+							</div>
 						{/if}
 					</div>
 				</div>
@@ -2293,6 +3406,7 @@
 				{@const turnDocs = getTurnDocs(turn)}
 				{@const connectedNodes = getConnectedCustomNodes(turn.id)}
 				{@const placement = assoc?.imagePlacement ?? 'top'}
+				{@const branchInfo = getTurnBranchInfo(turn)}
 				{@const activeImgIdx = Math.min(
 					assoc?.activeImageIndex ?? 0,
 					Math.max(0, turnImages.length - 1)
@@ -2301,7 +3415,12 @@
 
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<div
+					data-node-id={turn.id}
+					data-turn-index={turn.turnIndex}
+					data-message-id={turn.assistantMessage?.id ?? turn.userMessage?.id}
+					data-message-role="assistant"
 					class="canvas-node-card pointer-events-auto absolute flex flex-col rounded-2xl border border-border/80 bg-background/95 shadow-md backdrop-blur-md transition-all hover:border-primary/50 hover:shadow-xl"
+					class:canvas-spotlight-active={provenanceNavigation.spotlightNodeId === turn.id}
 					style="left: {turn.x}px; top: {turn.y}px; width: {turn.width}px;"
 					onmouseup={(e) => connectingFromId && completeConnection(turn.id, e)}
 				>
@@ -2343,6 +3462,36 @@
 									{turn.assistantMessage.model}
 								</span>
 							{/if}
+							{#if branchInfo}
+								<span
+									class="inline-flex shrink-0 items-center gap-0.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-1 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300"
+									title="该消息存在多个学习分支，点击切换（原分支完整保留）"
+								>
+									<button
+										aria-label="切换到上一个学习分支"
+										class="rounded px-0.5 hover:bg-emerald-500/20"
+										onclick={(e) => {
+											e.stopPropagation();
+											void switchTurnBranch(turn, -1);
+										}}
+										type="button"
+									>
+										<ChevronLeft class="h-3 w-3" />
+									</button>
+									<span>分支 {branchInfo.current}/{branchInfo.total}</span>
+									<button
+										aria-label="切换到下一个学习分支"
+										class="rounded px-0.5 hover:bg-emerald-500/20"
+										onclick={(e) => {
+											e.stopPropagation();
+											void switchTurnBranch(turn, 1);
+										}}
+										type="button"
+									>
+										<ChevronRight class="h-3 w-3" />
+									</button>
+								</span>
+							{/if}
 						</div>
 
 						<div class="flex flex-wrap items-center gap-1">
@@ -2381,6 +3530,15 @@
 								type="button"
 							>
 								+ 关联记忆
+							</button>
+
+							<button
+								class="rounded-md px-1.5 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+								onclick={() => handleTurnBranchFollowup(turn)}
+								title="围绕此轮对话锚定历史分支并展开追问（原分支完整保留）"
+								type="button"
+							>
+								🌿 分支追问
 							</button>
 
 							<button
@@ -2965,3 +4123,33 @@
 		</div>
 	</div>
 {/if}
+
+<style>
+	:global(.canvas-world-layer--navigating) {
+		transition: transform 450ms cubic-bezier(0.16, 1, 0.3, 1) !important;
+	}
+
+	:global(.canvas-spotlight-active) {
+		animation: canvas-card-spotlight 2.5s cubic-bezier(0.25, 1, 0.5, 1) forwards !important;
+		z-index: 45 !important;
+	}
+
+	@keyframes canvas-card-spotlight {
+		0% {
+			box-shadow: 0 0 0 0 var(--color-primary, #6366f1), 0 0 25px 2px color-mix(in oklab, var(--color-primary, #6366f1) 50%, transparent);
+			transform: scale(1);
+		}
+		25% {
+			box-shadow: 0 0 0 8px color-mix(in oklab, var(--color-primary, #6366f1) 30%, transparent), 0 0 45px 8px color-mix(in oklab, var(--color-primary, #6366f1) 60%, transparent);
+			transform: scale(1.025);
+		}
+		60% {
+			box-shadow: 0 0 0 14px transparent, 0 0 20px 2px color-mix(in oklab, var(--color-primary, #6366f1) 25%, transparent);
+			transform: scale(1.01);
+		}
+		100% {
+			box-shadow: 0 0 0 0 transparent;
+			transform: scale(1);
+		}
+	}
+</style>

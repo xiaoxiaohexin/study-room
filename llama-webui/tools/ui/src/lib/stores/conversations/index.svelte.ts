@@ -272,10 +272,14 @@ class ConversationsStore implements ConversationsPreferencesHost {
 		const conversation = await DatabaseService.createConversation(conversationName, {
 			cwd: this.preferences.pendingCwd ?? undefined,
 			reasoningEffort: this.preferences.pendingReasoningEffort,
+			ragNamespace: this.preferences.pendingRagNamespace || 'default',
+			courseId: this.preferences.pendingCourseId ?? undefined,
 			...this.preferences.getToolPolicySnapshot()
 		});
 
 		this.preferences.pendingCwd = null;
+		this.preferences.pendingRagNamespace = 'default';
+		this.preferences.pendingCourseId = null;
 
 		this.conversations = [conversation, ...this.conversations];
 		this.activeConversation = conversation;
@@ -526,9 +530,11 @@ class ConversationsStore implements ConversationsPreferencesHost {
 				return false;
 			}
 
-			// Drop any cwd the user drafted on the empty new-chat screen -
+			// Drop any pending draft state drafted on the empty new-chat screen -
 			// it doesn't belong to this conversation.
 			this.preferences.pendingCwd = null;
+			this.preferences.pendingRagNamespace = 'default';
+			this.preferences.pendingCourseId = null;
 
 			const allMessages = await DatabaseService.getConversationMessages(convId);
 

@@ -430,7 +430,9 @@ export class DatabaseService {
 								serverId: o.serverId
 							}))
 						: undefined,
-					name: options.name
+					name: options.name,
+					ragNamespace: sourceConv.ragNamespace,
+					courseId: sourceConv.courseId
 				};
 
 				await db[IDXDB_TABLES.conversations].add(newConv);

@@ -18,10 +18,13 @@ async def list_memories(
     user_id: str,
     type: str | None = Query(None, description="working | episodic | semantic | perceptual"),
     limit: int = Query(50, ge=1, le=200),
+    session_id: str | None = Query(None, description="可选：仅查看该会话作用域的记忆"),
     container: AppContainer = Depends(get_container),
 ):
     """查询指定用户的长期/短期记忆列表。"""
-    items = await container.memory_manager.list_items(user_id=user_id, type=type, limit=limit)
+    items = await container.memory_manager.list_items(
+        user_id=user_id, type=type, limit=limit, session_id=session_id
+    )
     return {"user_id": user_id, "count": len(items), "items": items}
 
 
@@ -47,10 +50,11 @@ async def add_memory(
 @router.post("/{user_id}/consolidate")
 async def consolidate_memories(
     user_id: str,
+    session_id: str | None = Query(None, description="可选：仅整合该会话的记忆"),
     container: AppContainer = Depends(get_container),
 ):
     """手动触发用户的记忆强化与沉淀流转（Working -> Episodic -> Semantic）。"""
-    res = await container.memory_manager.consolidate(user_id)
+    res = await container.memory_manager.consolidate(user_id, session_id=session_id)
     return {"user_id": user_id, "result": res}
 
 

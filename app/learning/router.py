@@ -9,6 +9,7 @@ from typing import Literal
 from app.agent.prompts import AGENT_SYSTEM_PROMPT
 from app.learning.store import LearningStore
 from app.observability.logging import get_logger
+from app.query.policy import RetrievalMode, has_web_intent, is_non_retrieval_chat
 
 log = get_logger(__name__)
 
@@ -22,16 +23,19 @@ class RouteDecision:
     tool_names: list[str]
     max_steps: int = 6
     reason: str = ""
+    retrieval_mode: RetrievalMode = "local"
+    allow_web_fallback: bool = False
+    expose_tools: bool = True
 
 
 # 每个模式下仅暴露 2~4 个最相关的工具，防止本地小模型（Gemma-4 E4B）工具选择过载
 MODE_TOOLS: dict[LearningMode, list[str]] = {
-    "explain": ["rag_search_tool", "knowledge_tool", "note_tool"],
+    "explain": ["rag_search_tool", "knowledge_tool", "note_tool", "web_tool"],
     "quiz": ["quiz_tool", "knowledge_tool", "rag_search_tool"],
     "grade": ["grade_tool", "review_tool"],
     "review": ["review_tool", "quiz_tool", "grade_tool"],
     "plan": ["progress_tool", "knowledge_tool", "note_tool"],
-    "homework": ["rag_search_tool", "knowledge_tool", "note_tool"],
+    "homework": ["rag_search_tool", "knowledge_tool", "note_tool", "web_tool"],
     "chat": [
         "rag_search_tool",
         "knowledge_tool",
@@ -41,6 +45,7 @@ MODE_TOOLS: dict[LearningMode, list[str]] = {
         "progress_tool",
         "note_tool",
         "memory_tool",
+        "web_tool",
     ],
 }
 
@@ -107,6 +112,39 @@ class IntentRouter:
     def __init__(self, learning_store: LearningStore | None = None):
         self.learning_store = learning_store
 
+    @staticmethod
+    def _make_decision(
+        mode: LearningMode,
+        reason: str,
+        message: str,
+        *,
+        max_steps: int = 6,
+    ) -> RouteDecision:
+        """Build a decision with deterministic retrieval and tool boundaries."""
+        tool_names = list(MODE_TOOLS[mode])
+        retrieval_mode: RetrievalMode = "local"
+        expose_tools = True
+
+        if mode == "chat" and is_non_retrieval_chat(message):
+            retrieval_mode = "none"
+            tool_names = []
+            expose_tools = False
+        elif mode in {"grade", "review", "plan"}:
+            # These modes obtain state through their dedicated tools.
+            retrieval_mode = "none"
+
+        allow_web = mode not in {"grade", "review", "plan"} and has_web_intent(message)
+        return RouteDecision(
+            mode=mode,
+            system_prompt=MODE_PROMPTS[mode],
+            tool_names=tool_names,
+            max_steps=max_steps,
+            reason=reason,
+            retrieval_mode=retrieval_mode,
+            allow_web_fallback=allow_web,
+            expose_tools=expose_tools,
+        )
+
     async def route(
         self,
         user_id: str,
@@ -119,20 +157,18 @@ class IntentRouter:
         # 0. 显式指定模式优先
         if explicit_mode and explicit_mode in MODE_TOOLS:
             mode: LearningMode = explicit_mode  # type: ignore[assignment]
-            return RouteDecision(
-                mode=mode,
-                system_prompt=MODE_PROMPTS[mode],
-                tool_names=MODE_TOOLS[mode],
-                reason="explicit_mode",
+            return self._make_decision(
+                mode,
+                "explicit_mode",
+                msg,
             )
 
         # 1. 多模态图片上传默认进入苏格拉底作业辅导模式
         if images:
-            return RouteDecision(
-                mode="homework",
-                system_prompt=MODE_PROMPTS["homework"],
-                tool_names=MODE_TOOLS["homework"],
-                reason="multimodal_image_attached",
+            return self._make_decision(
+                "homework",
+                "multimodal_image_attached",
+                msg,
             )
 
         # 2. 检查是否存在待作答题目，且用户输入像是在作答
@@ -140,62 +176,55 @@ class IntentRouter:
             pending_q = await self.learning_store.get_latest_unanswered_question(user_id)
             if pending_q:
                 is_short_choice = bool(re.match(r"^[A-Fa-f]$", msg))
-                if is_short_choice or self._GRADE_RE.search(msg) or f"q_" in msg:
-                    return RouteDecision(
-                        mode="grade",
-                        system_prompt=MODE_PROMPTS["grade"],
-                        tool_names=MODE_TOOLS["grade"],
+                if is_short_choice or self._GRADE_RE.search(msg) or "q_" in msg:
+                    return self._make_decision(
+                        "grade",
+                        f"answering_pending_question:{pending_q['id']}",
+                        msg,
                         max_steps=4,
-                        reason=f"answering_pending_question:{pending_q['id']}",
                     )
 
         # 3. 关键词规则匹配
         if self._GRADE_RE.search(msg):
-            return RouteDecision(
-                mode="grade",
-                system_prompt=MODE_PROMPTS["grade"],
-                tool_names=MODE_TOOLS["grade"],
+            return self._make_decision(
+                "grade",
+                "keyword_grade",
+                msg,
                 max_steps=4,
-                reason="keyword_grade",
             )
         if self._QUIZ_RE.search(msg):
-            return RouteDecision(
-                mode="quiz",
-                system_prompt=MODE_PROMPTS["quiz"],
-                tool_names=MODE_TOOLS["quiz"],
+            return self._make_decision(
+                "quiz",
+                "keyword_quiz",
+                msg,
                 max_steps=5,
-                reason="keyword_quiz",
             )
         if self._REVIEW_RE.search(msg):
-            return RouteDecision(
-                mode="review",
-                system_prompt=MODE_PROMPTS["review"],
-                tool_names=MODE_TOOLS["review"],
+            return self._make_decision(
+                "review",
+                "keyword_review",
+                msg,
                 max_steps=5,
-                reason="keyword_review",
             )
         if self._PLAN_RE.search(msg):
-            return RouteDecision(
-                mode="plan",
-                system_prompt=MODE_PROMPTS["plan"],
-                tool_names=MODE_TOOLS["plan"],
+            return self._make_decision(
+                "plan",
+                "keyword_plan",
+                msg,
                 max_steps=5,
-                reason="keyword_plan",
             )
         if self._EXPLAIN_RE.search(msg):
-            return RouteDecision(
-                mode="explain",
-                system_prompt=MODE_PROMPTS["explain"],
-                tool_names=MODE_TOOLS["explain"],
+            return self._make_decision(
+                "explain",
+                "keyword_explain",
+                msg,
                 max_steps=6,
-                reason="keyword_explain",
             )
 
         # 4. 默认通用学习对话模式
-        return RouteDecision(
-            mode="chat",
-            system_prompt=MODE_PROMPTS["chat"],
-            tool_names=MODE_TOOLS["chat"],
+        return self._make_decision(
+            "chat",
+            "default_chat",
+            msg,
             max_steps=8,
-            reason="default_chat",
         )

@@ -11,9 +11,10 @@
 	import { getChatMessageEditContext } from '$lib/contexts';
 	import { MessageRole } from '$lib/enums';
 	import { useProcessingState } from '$lib/hooks/use-processing-state.svelte';
+	import { provenanceNavigation } from '$lib/services/provenance-navigation.service';
 	import { chatStore, modelsStore, serverStore, settingsStore } from '$lib/stores';
-	import { modelLoadProgressText } from '$lib/utils';
-	import { hasAgenticContent } from '$lib/utils';
+	import { hasAgenticContent, modelLoadProgressText } from '$lib/utils';
+	import { Brain, Sparkles } from '@lucide/svelte';
 
 	interface Props {
 		class?: string;
@@ -76,6 +77,10 @@
 			isActivelyProcessing &&
 			(!hasNoContent || isAgentic) &&
 			isLastAssistantMessage
+	);
+
+	let associatedKnowledgeNodes = $derived(
+		provenanceNavigation.getKnowledgeNodesForMessage(message.id)
 	);
 
 	let assistantEl: HTMLDivElement | undefined = $state();
@@ -158,6 +163,26 @@
 
 	{#if showProcessingInfoBottom}
 		<ChatMessageAssistantProcessingInfo {modelLoadingText} position="bottom" {processingState} />
+	{/if}
+
+	{#if associatedKnowledgeNodes.length > 0}
+		<div class="knowledge-capsules mt-2.5 mb-2 flex flex-wrap items-center gap-1.5 pt-1">
+			<span class="text-[11px] text-muted-foreground flex items-center gap-1">
+				<Brain class="h-3 w-3 text-primary" />
+				已沉淀知识点:
+			</span>
+			{#each associatedKnowledgeNodes as knode (knode.id)}
+				<button
+					type="button"
+					class="group inline-flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 hover:bg-primary/20 px-2.5 py-0.5 text-xs font-medium text-primary shadow-xs transition-all hover:scale-105 active:scale-95 cursor-pointer"
+					onclick={() => provenanceNavigation.focusCanvasNode(knode.id)}
+					title="在画布中居中聚焦卡片「{knode.title}」"
+				>
+					<Sparkles class="h-3 w-3 text-primary group-hover:rotate-12 transition-transform" />
+					<span class="max-w-48 truncate">{knode.title}</span>
+				</button>
+			{/each}
+		</div>
 	{/if}
 
 	{#if displayedModel}

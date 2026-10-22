@@ -151,7 +151,66 @@ python cli.py --user xiaoxiao
 | `/new` | `/new` | 开启一个全新的对话会话 |
 | `/exit` | `/exit` 或 `/quit` | 退出交互终端 |
 
+---
 
+## 🔒 知识库隔离、真实溯源与安全边界（Fix Round P0-P2）
+
+这一轮按 Review 的缺陷等级修完了三组问题：
+
+1. **P0：真打通 + 真隔离**
+   - 划词建卡不再伪造"参考教材 P.1"：新增 `POST /api/rag/attribute` 把选中文本归因到知识库真实切片（字符三元组包含度达标才算命中），只有命中才写入 `doc_id / chunk_id / 页号`。
+   - 教材预览改为真实原文：视频式假段落已删除，改为 `GET /api/rag/documents/{doc_id}/file|page` + 浏览器 pdf.js 单页渲染（非 PDF 显示抽取页文本）。
+   - 会话作用域收口：`ToolContext` 携带 `rag_namespace/course_id`，`rag_search_tool` 不再允许模型自选命名空间；画布 RAG 检索卡、知识库对话框、知识节点写库统一走会话绑定的课程/知识库（`learning-context`）。
+   - 学习数据层加归属校验：`knowledge_points` 增加 `user_id`，课程自动注册，跨课程/跨用户查询、改写、建关系、回滚一律拒绝；新增删除知识点接口并级联清理关系/前置/掌握度。
+   - 修复真实轮次锚点（此前"对话 #N"取的是分支兄弟序号，线性对话恒为 0）。
+
+2. **P1：闭环一致性**
+   - 版本以后端 `history_json` 为唯一事实源：前端每次写入成功后采纳后端版本/历史，删除画布节点同步删后端，画布加载时自动从后端补齐知识节点与语义关系，失败写入本地标记待重试。
+   - 画布对话卡片新增"分支 x/y ◀▶"指示与切换（原分支完整保留）；记忆 consolidate/remove 严格按会话作用域执行。
+
+3. **P2：边界与验证**
+   - 可选 `API_TOKEN`：设置后除 `/health` 外所有接口需 `Authorization: Bearer <token>`（WebUI 设置里的 API Key 填同一个值即可）。**本机单用户默认不开启**；若监听局域网地址请务必开启并收紧 `CORS_ORIGINS`。
+   - 新增真浏览器全栈 E2E（离线 FakeLLM + 真实 FastAPI + Vite dev server）：划词建卡、锚点跳转、分支切换、真实 PDF 页预览。
+   - 已知限制与验证命令见 [PROJECT.md](PROJECT.md) 的 "Known Limitations / Deferred" 与 "Verification Commands"。
+
+```bash
+# 全栈浏览器 E2E（会自动启动离线后端 + 前端 dev server）
+cd llama-webui/tools/ui && npm run test:e2e:fullstack
+```
+
+---
+
+## 🌐 联网资料「临时知识库 → 提纯 → 晋升」流程（可选，默认关闭）
+
+为了避免联网内容直接污染正式知识库，引入 Bronze/Silver/Gold 三层：
+
+1. **临时知识库（Staging，Bronze）**：知识库面板的「联网导入」可通过 URL 抓取或搜索发现网页，内容先落到独立 `staging_{embedder}` 向量集合与快照文件；也可以由聊天在本地资料不足时（`WEB_FALLBACK_MODE=auto`）通过 MCP/搜索 Provider 自动补充并暂存。临时库**不参与标准 RAG 检索**，默认 7 天 TTL 自动清理。
+2. **提纯候选（Silver）**：对临时网页点「提纯」→ 规则清洗 + 质量分 + LLM 结构化提炼成知识节点候选（标题/摘要/要点/原文证据），进入「待入库知识候选」列表，可勾选或驳回。
+3. **晋升标准知识库（Gold）**：勾选候选 →「晋升到正式库」→ 后端把网页快照重新入库到目标课程 namespace，并创建知识节点卡片（画布加载时自动补齐）。晋升可一键撤销（删除标准文档与由它创建的知识节点）。
+
+安全边界：抓取层做 SSRF 防护（拒绝内网/回环/云元数据地址，可用 `WEB_ALLOW_LOOPBACK` 供本地测试）、大小/超时限制、域名白名单；联网资料在 Prompt 中以 `[WEB]` 标记为非权威来源，引用需带 URL 与抓取时间。
+
+```bash
+# 开启联网导入（.env）
+WEB_ENABLED=true
+# 搜索发现（任选其一）
+WEB_SEARCH_PROVIDER=searxng
+WEB_SEARCH_BASE_URL=http://127.0.0.1:8888
+# 主搜索服务连不上时自动回退到内置 Bing RSS（无需安装，默认开启；设为 none 可关闭）
+WEB_SEARCH_FALLBACK_PROVIDER=bing
+# 或外部 MCP 搜索服务（注意：项目只内置 MCP 客户端，不内置/安装 MCP 服务端）
+# MCP_WEB_SERVER_URL=http://127.0.0.1:9000/mcp
+# 运行期自动联网补充（可选）
+WEB_FALLBACK_MODE=auto
+```
+
+> 搜索与抓取是两条独立通道：**贴 URL 抓取不需要任何搜索服务**；搜索发现才需要
+> SearXNG / Tavily / Bing 兜底 / 外部 MCP 搜索服务之一。若使用 SearXNG，需确保实例已启动且
+> `settings.yml` 的 `search.formats` 包含 `json`（公开实例常禁用 JSON API，会返回 403）。
+
+相关后端入口：`/api/web/*`、`/api/staging/*`；前端在知识库管理对话框的「联网导入」「临时知识库」两个标签页。
+
+---
 
 ## 致谢与参考
 

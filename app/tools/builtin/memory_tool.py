@@ -41,7 +41,9 @@ class MemoryTool(Tool):
             q = arguments.get("query", "")
             if not q:
                 return ToolResult(ok=False, error="query cannot be empty for search")
-            results = await self.memory.retrieve_all([q], user_id=user_id, top_k=5)
+            results = await self.memory.retrieve_all(
+                [q], user_id=user_id, top_k=5, session_id=context.session_id
+            )
             if not results:
                 return ToolResult(ok=True, output="未检索到相关记忆。")
             lines = [

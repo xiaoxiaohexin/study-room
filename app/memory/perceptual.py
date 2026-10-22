@@ -78,7 +78,9 @@ class PerceptualMemory(BaseMemory):
         log.info("perceptual_memory_added", user_id=item.user_id, memory_id=item.id)
         return item.id
 
-    async def retrieve(self, query: str, user_id: str, top_k: int = 5) -> list[ScoredMemory]:
+    async def retrieve(
+        self, query: str, user_id: str, top_k: int = 5, session_id: str | None = None
+    ) -> list[ScoredMemory]:
         if self.vector_store and self.embedder and query.strip():
             col = self._collection()
             await self.vector_store.ensure_collection(col, self.embedder.dim)
@@ -123,12 +125,28 @@ class PerceptualMemory(BaseMemory):
             )
         return scored[:top_k]
 
-    async def remove(self, ids: list[str]) -> None:
+    async def remove(
+        self,
+        ids: list[str],
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+    ) -> None:
         id_set = set(ids)
-        for uid in self._items:
-            self._items[uid] = [it for it in self._items[uid] if it.id not in id_set]
+        for uid in list(self._items.keys()):
+            if user_id is not None and uid != user_id:
+                continue
+            items = self._items[uid]
+            kept = [
+                it
+                for it in items
+                if not (it.id in id_set and (session_id is None or it.session_id == session_id))
+            ]
+            self._items[uid] = kept
         if self.vector_store and self.embedder and ids:
             await self.vector_store.delete(self._collection(), ids)
 
-    async def list_items(self, user_id: str, limit: int = 50) -> list[MemoryItem]:
+    async def list_items(
+        self, user_id: str, limit: int = 50, session_id: str | None = None
+    ) -> list[MemoryItem]:
         return list(reversed(self._items.get(user_id, [])))[:limit]

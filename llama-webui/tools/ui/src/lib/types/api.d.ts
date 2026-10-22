@@ -303,6 +303,10 @@ export interface ApiChatCompletionRequest {
 	}>;
 	stream?: boolean;
 	model?: string;
+	// Session & RAG routing (Milestone M4)
+	session_id?: string;
+	rag_namespace?: string;
+	course_id?: string;
 	return_progress?: boolean;
 	sse_ping_interval?: number;
 	tools?: ApiChatCompletionTool[];

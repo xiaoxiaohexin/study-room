@@ -79,6 +79,13 @@ export interface SettingsSection {
 
 export interface SettingsChatServiceOptions {
 	stream?: boolean;
+	// Session & RAG parameters (Milestone M4)
+	session_id?: string;
+	sessionId?: string;
+	rag_namespace?: string;
+	ragNamespace?: string;
+	course_id?: string;
+	courseId?: string;
 	// Model (required in ROUTER mode, optional in MODEL mode)
 	model?: string;
 	// System message to inject

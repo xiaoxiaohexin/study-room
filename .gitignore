@@ -6,6 +6,7 @@ __pycache__/
 *.pyd
 .pytest_cache/
 .pytest_temp/
+.pytest_temp_*/
 .ruff_cache/
 *.egg-info/
 dist/
@@ -19,4 +20,10 @@ dev-dist/
 # Local sensitive configs & data
 .env
 data/
+data_e2e/
+temp_data/
+temp_data2/
 *.log
+
+# Internal agent workspace (rollback patches, debug logs)
+.agents/

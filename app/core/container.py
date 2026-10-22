@@ -44,8 +44,16 @@ from app.tools.builtin.memory_tool import MemoryTool
 from app.tools.builtin.note_tool import NoteTool
 from app.tools.builtin.rag_tool import RagTool
 from app.tools.builtin.terminal_tool import TerminalTool
+from app.tools.builtin.web_tool import WebTool
 from app.tools.parser import ToolCallParser
 from app.tools.registry import ToolRegistry
+from app.web.distill import DistillationService
+from app.web.fetcher import WebFetcher
+from app.web.mcp_search import McpSearchClient
+from app.web.promotion import PromotionService
+from app.web.search import SearchProvider, build_search_providers
+from app.web.staging import WebStagingService
+from app.web.supplement import WebSupplementService
 
 log = get_logger(__name__)
 
@@ -80,6 +88,15 @@ class AppContainer:
         self.chunker: MarkdownChunker
         self.ingestion_pipeline: IngestionPipeline
         self.rag_retriever: RagRetriever
+
+        # 4.5 联网 / 临时知识库（Staging）
+        self.web_fetcher: WebFetcher
+        self.web_search_providers: list[SearchProvider]
+        self.mcp_web_client: McpSearchClient
+        self.web_staging: WebStagingService
+        self.web_distiller: DistillationService
+        self.web_promoter: PromotionService
+        self.web_supplement: WebSupplementService
 
         # 5. 上下文与查询扩充
         self.context_builder: ContextBuilder
@@ -212,7 +229,7 @@ class AppContainer:
             perceptual=self.perceptual_memory,
             lifecycle=self.memory_lifecycle,
         )
-        self.learning_store = LearningStore(self.sqlite)
+        self.learning_store = LearningStore(self.sqlite, graph_store=self.graph_store)
         self.intent_router = IntentRouter(self.learning_store)
         self.status["learning_engine"] = "ok:sm2_ema"
 
@@ -227,10 +244,51 @@ class AppContainer:
             chunker=self.chunker,
             embedder=self.embedder,
             vector_store=self.vector_store,
+            sqlite=self.sqlite,
         )
+        # Backfill the RAG document registry so documents ingested before it existed
+        # can still be previewed page by page.
+        try:
+            await IngestionPipeline.backfill_document_registry(
+                self.sqlite, s.data_dir, self.embedder.tag
+            )
+        except Exception as e:  # noqa: BLE001 - backfill must never block startup
+            log.warning("document_registry_backfill_failed", error=str(e))
         self.rag_retriever = RagRetriever(
             vector_store=self.vector_store,
             embedder=self.embedder,
+        )
+
+        # 8.5 初始化联网 / 临时知识库（Staging）与晋升管线
+        self.web_fetcher = WebFetcher(s)
+        self.web_search_providers = build_search_providers(s)
+        self.mcp_web_client = McpSearchClient(s)
+        self.web_staging = WebStagingService(
+            settings=s,
+            sqlite=self.sqlite,
+            pipeline=self.ingestion_pipeline,
+            fetcher=self.web_fetcher,
+            search_providers=self.web_search_providers,
+            mcp_client=self.mcp_web_client,
+        )
+        self.web_distiller = DistillationService(
+            settings=s,
+            sqlite=self.sqlite,
+            llm=self.llm,
+            chunker=self.chunker,
+        )
+        self.web_promoter = PromotionService(
+            settings=s,
+            sqlite=self.sqlite,
+            pipeline=self.ingestion_pipeline,
+            learning_store=self.learning_store,
+            staging=self.web_staging,
+        )
+        self.web_supplement = WebSupplementService(settings=s, staging=self.web_staging)
+        self.status["web"] = (
+            "ok:enabled"
+            if s.web_enabled
+            else "disabled"
         )
 
         # 9. 初始化上下文与查询扩充
@@ -257,6 +315,14 @@ class AppContainer:
         self.tool_registry.register(GradeTool(store=self.learning_store, llm=self.llm))
         self.tool_registry.register(ReviewTool(store=self.learning_store))
         self.tool_registry.register(ProgressTool(store=self.learning_store))
+        self.tool_registry.register(
+            WebTool(
+                staging=self.web_staging,
+                settings=s,
+                distiller=self.web_distiller,
+                promoter=self.web_promoter,
+            )
+        )
         self.tool_parser = ToolCallParser()
 
         # 11. 初始化会话状态、反思与日志

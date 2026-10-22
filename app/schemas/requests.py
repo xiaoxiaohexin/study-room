@@ -14,7 +14,11 @@ class ChatRequest(BaseModel):
         None,
         description="可选：显式指定学习模式 (explain/quiz/grade/review/plan/homework/chat)，为空时自动路由",
     )
-    rag_namespace: str = "default"
+    course_id: str | None = Field(None, description="可选：关联课程 ID")
+    rag_namespace: str | None = Field(
+        None,
+        description="可选：关联 RAG 知识库命名空间，为空时遵循会话绑定或回退 default",
+    )
     max_steps: int | None = Field(None, ge=1, le=30)
     enable_query_expansion: bool = True
     enable_reflection: bool = True
@@ -25,6 +29,17 @@ class RagSearchRequest(BaseModel):
     namespace: str = "default"
     top_k: int = Field(5, ge=1, le=50)
     expand: bool = False
+
+
+class RagAttributeRequest(BaseModel):
+    """Selected quote attribution: match a quote back to the textbook chunk it came from."""
+
+    quote: str = Field(..., min_length=2, max_length=8000)
+    namespace: str = "default"
+    top_k: int = Field(8, ge=1, le=30)
+    min_overlap: float | None = Field(
+        None, ge=0.0, le=1.0, description="字符三元组包含度阈值；为空时使用服务端配置"
+    )
 
 
 class MemoryAddRequest(BaseModel):

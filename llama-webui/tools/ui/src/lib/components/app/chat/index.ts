@@ -192,6 +192,12 @@ export { default as ChatFormActions } from './ChatForm/ChatFormActions/ChatFormA
 export { default as ChatFormActionSubmit } from './ChatForm/ChatFormActions/ChatFormActionSubmit.svelte';
 
 /**
+ * Knowledge Base (RAG namespace) selector for chat form action bar.
+ * Renders a dropdown on desktop and a bottom drawer on mobile phones.
+ */
+export { default as ChatFormActionKnowledgeBase } from './ChatForm/ChatFormActions/ChatFormActionKnowledgeBase.svelte';
+
+/**
  * Model selector component for the chat form action bar and the assistant message
  * model badge. Renders a dropdown on desktop and a bottom drawer on a phone.
  * Exposes an `open` method for programmatically opening the selector.

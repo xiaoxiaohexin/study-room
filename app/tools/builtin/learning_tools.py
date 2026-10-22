@@ -66,7 +66,9 @@ class KnowledgeTool(Tool):
 
     async def run(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         action = arguments.get("action", "list")
-        course_id = arguments.get("course_id") or "default"
+        course_id = (
+            arguments.get("course_id") or context.course_id or "default"
+        ).strip() or "default"
 
         if action == "create":
             name = (arguments.get("name") or "").strip()
@@ -74,18 +76,27 @@ class KnowledgeTool(Tool):
                 return ToolResult(ok=False, error="知识点名称 name 不能为空。")
             summary = arguments.get("summary") or ""
             difficulty = float(arguments.get("difficulty") or 0.5)
-            kp = await self.store.upsert_knowledge_point(
-                course_id=course_id, name=name, summary=summary, difficulty=difficulty
-            )
+            try:
+                kp = await self.store.upsert_knowledge_point(
+                    course_id=course_id,
+                    name=name,
+                    summary=summary,
+                    difficulty=difficulty,
+                    user_id=context.user_id,
+                )
+            except (PermissionError, ValueError) as e:
+                return ToolResult(ok=False, error=str(e))
             return ToolResult(
                 ok=True,
-                output=f"已保存知识点 [{kp['id']}] {kp['name']} (难度: {kp['difficulty']}): {kp['summary']}",
+                output=f"已保存知识点 [{kp['id']}] {kp['name']} (课程: {kp['course_id']}, 难度: {kp['difficulty']}): {kp['summary']}",
                 metadata=kp,
             )
 
         if action == "get":
             name = (arguments.get("name") or "").strip()
-            kp = await self.store.get_knowledge_point(name, course_id=course_id)
+            kp = await self.store.get_knowledge_point(
+                name, course_id=course_id, user_id=context.user_id
+            )
             if not kp:
                 return ToolResult(ok=True, output=f"未找到知识点 '{name}'。")
             return ToolResult(
@@ -94,7 +105,10 @@ class KnowledgeTool(Tool):
                 metadata=kp,
             )
 
-        kps = await self.store.list_knowledge_points(course_id=None if course_id == "all" else course_id)
+        kps = await self.store.list_knowledge_points(
+            course_id=None if course_id == "all" else course_id,
+            user_id=context.user_id,
+        )
         if not kps:
             return ToolResult(ok=True, output=f"课程 [{course_id}] 暂无已录入的知识点。")
         lines = [f"- [{k['id']}] {k['name']} (难度: {k['difficulty']}): {k['summary']}" for k in kps]
@@ -133,7 +147,11 @@ class QuizTool(Tool):
         action = arguments.get("action", "generate")
         topic = (arguments.get("topic") or "").strip()
         q_type = arguments.get("question_type") or "choice"
-        namespace = arguments.get("namespace") or "default"
+        # The session scope is authoritative for both retrieval and course binding.
+        namespace = (
+            arguments.get("namespace") or context.rag_namespace or "default"
+        ).strip() or "default"
+        effective_course = context.course_id or namespace
 
         if action == "next" and not topic:
             pending = await self.store.get_latest_unanswered_question(context.user_id)
@@ -152,11 +170,19 @@ class QuizTool(Tool):
             topic = "核心基础概念"
 
         # 确保知识点存在
-        kp = await self.store.get_knowledge_point(topic, course_id=namespace)
+        kp = await self.store.get_knowledge_point(
+            topic, course_id=effective_course, user_id=context.user_id
+        )
         if not kp:
-            kp = await self.store.upsert_knowledge_point(
-                course_id=namespace, name=topic, summary=f"{topic} 相关概念与应用"
-            )
+            try:
+                kp = await self.store.upsert_knowledge_point(
+                    course_id=effective_course,
+                    name=topic,
+                    summary=f"{topic} 相关概念与应用",
+                    user_id=context.user_id,
+                )
+            except (PermissionError, ValueError) as e:
+                return ToolResult(ok=False, error=str(e))
 
         # 自适应难度：若未指定，取当前掌握度 + 0.1
         difficulty = arguments.get("difficulty")

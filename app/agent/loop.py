@@ -87,6 +87,8 @@ class AgentLoop:
         active_tool_names: list[str] | None = None
         base_system_prompt = AGENT_SYSTEM_PROMPT
         active_mode = request.mode or "chat"
+        retrieval_mode = "local"
+        expose_tools = True
         if self.intent_router is not None:
             decision = await self.intent_router.route(
                 user_id=user_id,
@@ -97,6 +99,8 @@ class AgentLoop:
             active_mode = decision.mode
             base_system_prompt = decision.system_prompt
             active_tool_names = decision.tool_names
+            retrieval_mode = decision.retrieval_mode
+            expose_tools = decision.expose_tools
             yield AgentEvent(
                 type=EventType.STATUS,
                 step=0,
@@ -104,6 +108,8 @@ class AgentLoop:
                     "stage": "intent_routing",
                     "mode": decision.mode,
                     "tools": decision.tool_names,
+                    "retrieval_mode": decision.retrieval_mode,
+                    "web_allowed": decision.allow_web_fallback,
                     "detail": f"学习模式路由: [{decision.mode}] ({decision.reason}) | 挂载工具: {', '.join(decision.tool_names)}",
                 },
             )
@@ -112,7 +118,12 @@ class AgentLoop:
         queries = [request.message]
         hyde_doc = None
         skip_expansion_modes = {"grade", "quiz", "review", "plan", "homework"}
-        if request.enable_query_expansion and not request.images and active_mode not in skip_expansion_modes:
+        if (
+            request.enable_query_expansion
+            and not request.images
+            and retrieval_mode != "none"
+            and active_mode not in skip_expansion_modes
+        ):
             yield AgentEvent(
                 type=EventType.STATUS,
                 step=0,
@@ -128,16 +139,40 @@ class AgentLoop:
             step=0,
             data={"stage": "retrieval", "detail": "正在并行检索学情画像、用户记忆与知识库..."},
         )
-        if self.learning_store is not None:
+        effective_rag_namespace = (
+            (request.rag_namespace and request.rag_namespace.strip())
+            or (session.rag_namespace and session.rag_namespace.strip())
+            or "default"
+        )
+        effective_course_id = (
+            (request.course_id and request.course_id.strip())
+            or (session.course_id and session.course_id.strip())
+            or None
+        )
+        if retrieval_mode == "none":
+            memories, docs, learner_profile = [], [], ""
+            yield AgentEvent(
+                type=EventType.STATUS,
+                step=0,
+                data={
+                    "stage": "retrieval_skipped",
+                    "detail": "当前回合不需要外部检索，仅使用会话历史与模型已有知识。",
+                },
+            )
+        elif self.learning_store is not None:
             memories, docs, learner_profile = await asyncio.gather(
-                self.memory_manager.retrieve_all(queries, user_id=user_id, top_k=5),
-                self.rag_retriever.search(queries, namespace=request.rag_namespace, top_k=5),
+                self.memory_manager.retrieve_all(
+                    queries, user_id=user_id, top_k=5, session_id=session_id
+                ),
+                self.rag_retriever.search(queries, namespace=effective_rag_namespace, top_k=5),
                 self.learning_store.build_learner_profile_text(user_id=user_id),
             )
         else:
             memories, docs = await asyncio.gather(
-                self.memory_manager.retrieve_all(queries, user_id=user_id, top_k=5),
-                self.rag_retriever.search(queries, namespace=request.rag_namespace, top_k=5),
+                self.memory_manager.retrieve_all(
+                    queries, user_id=user_id, top_k=5, session_id=session_id
+                ),
+                self.rag_retriever.search(queries, namespace=effective_rag_namespace, top_k=5),
             )
             learner_profile = ""
 
@@ -145,12 +180,17 @@ class AgentLoop:
         from app.agent.prompts import TEXT_PROTOCOL_ADDON
 
         system_prompt = base_system_prompt
-        if not self.use_native_tools:
+        if not self.use_native_tools and expose_tools:
             system_prompt += f"\n{TEXT_PROTOCOL_ADDON}\n【可用工具列表】\n{self.tools.describe_for_prompt(names=active_tool_names)}"
 
         scratchpad_messages: list[Message] = []
         dialogue_steps_log: list[dict[str, Any]] = []
-        tool_ctx = ToolContext(user_id=user_id, session_id=session_id)
+        tool_ctx = ToolContext(
+            user_id=user_id,
+            session_id=session_id,
+            rag_namespace=effective_rag_namespace,
+            course_id=effective_course_id,
+        )
         final_answer = ""
         is_finished = False
 
@@ -173,7 +213,11 @@ class AgentLoop:
             current_messages = list(built_ctx.messages) + scratchpad_messages
 
             # 调用 LLM（仅挂载当前学习模式所需的精简工具子集）
-            specs = self.tools.specs(names=active_tool_names) if self.use_native_tools else None
+            specs = (
+                self.tools.specs(names=active_tool_names)
+                if self.use_native_tools and expose_tools
+                else None
+            )
             llm_resp = await self.llm.chat(current_messages, tools=specs)
 
             # 解析行动
@@ -362,8 +406,8 @@ class AgentLoop:
                 metadata={"images": request.images},
             )
 
-        # 触发记忆整合
-        await self.memory_manager.consolidate(user_id)
+        # 触发记忆整合（严格限定当前会话，避免把其他会话的临时状态卷进来）
+        await self.memory_manager.consolidate(user_id, session_id=session_id)
 
         # 记录全流程日志
         elapsed_sec = round(time.time() - start_time, 2)

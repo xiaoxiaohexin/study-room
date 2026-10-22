@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from app.context.builder import ContextBuilder
 from app.core.config import Settings
 from app.learning.algorithms import compute_sm2, grade_objective, score_to_quality, update_mastery_ema
@@ -148,8 +146,41 @@ async def test_learning_router_and_store_closed_loop(tmp_path: Path):
     await sqlite.aclose()
 
 
+async def test_intent_router_retrieval_policy():
+    router = IntentRouter()
+
+    smalltalk = await router.route("u1", "你好")
+    assert smalltalk.mode == "chat"
+    assert smalltalk.retrieval_mode == "none"
+    assert smalltalk.allow_web_fallback is False
+    assert smalltalk.expose_tools is False
+    assert smalltalk.tool_names == []
+
+    acknowledgement = await router.route("u1", "好的，谢谢")
+    assert acknowledgement.mode == "chat"
+    assert acknowledgement.retrieval_mode == "none"
+    assert acknowledgement.expose_tools is False
+
+    explanation = await router.route("u1", "请给我讲一下什么是反向传播算法？")
+    assert explanation.mode == "explain"
+    assert explanation.retrieval_mode == "local"
+    assert explanation.allow_web_fallback is False
+    assert explanation.expose_tools is True
+
+    web_lookup = await router.route("u1", "帮我查一下最新的光合作用研究进展")
+    assert web_lookup.mode == "chat"
+    assert web_lookup.retrieval_mode == "local"
+    assert web_lookup.allow_web_fallback is True
+
+    review = await router.route("u1", "帮我复习今天的错题")
+    assert review.mode == "review"
+    assert review.retrieval_mode == "none"
+    assert review.expose_tools is True
+
+
 async def test_learning_api_endpoints(tmp_path: Path):
     from httpx import ASGITransport, AsyncClient
+
     from app.core.container import AppContainer
 
     settings = Settings(
@@ -175,6 +206,7 @@ async def test_learning_api_endpoints(tmp_path: Path):
 
             r_kp = await client.post(
                 f"/api/courses/{course_id}/knowledge",
+                headers={"X-User-Id": "stu_1"},
                 json={"name": "洛必达法则", "summary": "0/0 与 ∞/∞ 未定式求极限", "difficulty": 0.6},
             )
             assert r_kp.status_code == 200
@@ -221,9 +253,10 @@ async def test_learning_api_endpoints(tmp_path: Path):
 
 
 async def test_llama_compat_learning_reconnection(tmp_path: Path):
-    from httpx import ASGITransport, AsyncClient
-    from datetime import datetime
     import json
+
+    from httpx import ASGITransport, AsyncClient
+
     from app.core.container import AppContainer
 
     settings = Settings(
@@ -311,4 +344,348 @@ async def test_llama_compat_learning_reconnection(tmp_path: Path):
             assert len(working_mems) >= 1
     finally:
         await container.aclose()
+
+
+async def test_llama_compat_skips_retrieval_for_smalltalk(tmp_path: Path):
+    from unittest.mock import AsyncMock
+
+    from httpx import ASGITransport, AsyncClient
+
+    from app.core.container import AppContainer
+
+    settings = Settings(
+        offline_mode=True,
+        sqlite_path=tmp_path / "compat_smalltalk.db",
+        data_dir=tmp_path / "data",
+    )
+    app = create_app(settings)
+    container = AppContainer(settings)
+    await container.initialize()
+    app.state.container = container
+    container.rag_retriever.search = AsyncMock(return_value=[])  # type: ignore[method-assign]
+    container.memory_manager.retrieve_all = AsyncMock(return_value=[])  # type: ignore[method-assign]
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "user_id": "test_student",
+                    "session_id": "sess_smalltalk",
+                    "messages": [{"role": "user", "content": "你好"}],
+                    "stream": False,
+                    "tools": [
+                        {"type": "function", "function": {"name": "rag_search_tool"}},
+                        {"type": "function", "function": {"name": "web_tool"}},
+                    ],
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.headers.get("x-retrieval-mode") == "none"
+        container.rag_retriever.search.assert_not_awaited()
+        container.memory_manager.retrieve_all.assert_not_awaited()
+    finally:
+        await container.aclose()
+
+
+async def test_knowledge_point_provenance_and_version_history(tmp_path: Path):
+    """验证知识点不可变原文摘录、可编辑正文分层存储、版本号递增、历史快照与掌握度自动入库。"""
+    sqlite = SQLiteStore(tmp_path / "kp_version.db")
+    await sqlite.initialize()
+    store = LearningStore(sqlite)
+
+    # 1. 划词初次创建 (v1)
+    prov = {
+        "message_id": "msg_001",
+        "turn_index": 2,
+        "doc_title": "deep_learning.pdf",
+        "page_start": 42,
+        "page_end": 43,
+        "quote_snippet": "梯度下降算法通过反向传播误差更新权重。",
+    }
+    kp1 = await store.upsert_knowledge_point(
+        course_id="cs229",
+        name="梯度下降",
+        summary="参数优化核心方法",
+        difficulty=0.5,
+        raw_quote=prov["quote_snippet"],
+        content="基础版：沿负梯度方向更新。",
+        provenance=prov,
+        user_id="user_test_m2",
+    )
+    assert kp1["version"] == 1
+    assert kp1["raw_quote"] == prov["quote_snippet"]
+    assert kp1["content"] == "基础版：沿负梯度方向更新。"
+    assert kp1["provenance"]["page_start"] == 42
+    assert len(kp1["history"]) == 1
+    assert kp1["history"][0]["version"] == 1
+
+    # 验证 mastery 表已自动登记 (SM-2 初始值: ef=2.5, repetitions=0, interval=1.0, mastery=0.3)
+    cur_m = await sqlite.conn.execute(
+        "SELECT * FROM mastery WHERE user_id = ? AND kp_id = ?",
+        ("user_test_m2", kp1["id"]),
+    )
+    m_row = await cur_m.fetchone()
+    assert m_row is not None
+    assert m_row["mastery"] == 0.3
+    assert m_row["ef"] == 2.5
+    assert m_row["interval_days"] == 1.0
+    assert m_row["repetitions"] == 0
+
+    # 2. 编辑正文 (v2) - 验证不可变摘录保持不变，版本号递增
+    kp2 = await store.upsert_knowledge_point(
+        course_id="cs229",
+        name="梯度下降",
+        summary="补充动量项说明",
+        difficulty=0.6,
+        raw_quote="尝试修改原始摘录（应当被忽略）",
+        content="进阶版：引入动量（Momentum）和自适应学习率（Adam）。",
+        kp_id=kp1["id"],
+        user_id="user_test_m2",
+    )
+    assert kp2["id"] == kp1["id"]
+    assert kp2["version"] == 2
+    # 原始摘录不变
+    assert kp2["raw_quote"] == prov["quote_snippet"]
+    assert kp2["content"] == "进阶版：引入动量（Momentum）和自适应学习率（Adam）。"
+    assert len(kp2["history"]) == 2
+    assert kp2["history"][1]["version"] == 2
+
+    # 3. 验证 get_knowledge_point 和 get_revisions
+    fetched = await store.get_knowledge_point(kp1["id"], user_id="user_test_m2")
+    assert fetched is not None
+    assert fetched["version"] == 2
+    assert fetched["provenance"]["doc_title"] == "deep_learning.pdf"
+
+    revisions = await store.get_revisions(kp1["id"], user_id="user_test_m2")
+    assert len(revisions) == 2
+    assert revisions[0]["version"] == 1
+    assert revisions[1]["version"] == 2
+
+    await sqlite.aclose()
+
+
+async def test_knowledge_point_non_destructive_rollback(tmp_path: Path):
+    """验证知识点版本非破坏性回滚（生成新版本快照并恢复目标内容）。"""
+    import pytest
+
+    sqlite = SQLiteStore(tmp_path / "kp_rollback.db")
+    await sqlite.initialize()
+    store = LearningStore(sqlite)
+
+    # 创建 v1
+    kp = await store.upsert_knowledge_point(
+        course_id="math101",
+        name="泰勒展开",
+        summary="初版",
+        raw_quote="f(x) = f(a) + f'(a)(x-a) + ...",
+        content="第一版笔记：多项式近似。",
+    )
+    kp_id = kp["id"]
+    assert kp["version"] == 1
+
+    # 更新到 v2
+    await store.upsert_knowledge_point(
+        course_id="math101",
+        name="泰勒展开",
+        content="第二版笔记：包含皮亚诺余项。",
+        kp_id=kp_id,
+    )
+
+    # 更新到 v3
+    await store.upsert_knowledge_point(
+        course_id="math101",
+        name="泰勒展开",
+        content="第三版笔记：包含拉格朗日余项推导。",
+        kp_id=kp_id,
+    )
+
+    revs_before = await store.get_revisions(kp_id)
+    assert len(revs_before) == 3
+
+    # 执行非破坏性回滚至 v1 -> 生成 v4，正文恢复为 v1
+    rolled = await store.rollback_knowledge_point(kp_id, target_version=1)
+    assert rolled["version"] == 4
+    assert rolled["content"] == "第一版笔记：多项式近似。"
+    assert len(rolled["history"]) == 4
+    assert rolled["history"][-1]["changeType"] == "rollback"
+
+    # 再次查询确认持久化
+    fetched = await store.get_knowledge_point(kp_id)
+    assert fetched["version"] == 4
+    assert fetched["content"] == "第一版笔记：多项式近似。"
+
+    # 边界情况：回滚到不存在的版本抛出 ValueError
+    with pytest.raises(ValueError):
+        await store.rollback_knowledge_point(kp_id, target_version=99)
+
+    # 边界情况：回滚不存在的知识点抛出 KeyError
+    with pytest.raises(KeyError):
+        await store.rollback_knowledge_point("kp_nonexistent", target_version=1)
+
+    await sqlite.aclose()
+
+
+async def test_semantic_relations_and_prereq_dual_write(tmp_path: Path):
+    """验证强类型语义关系存储、查询、删除及 prerequisite 双写 kp_prereq。"""
+    sqlite = SQLiteStore(tmp_path / "relations.db")
+    await sqlite.initialize()
+    store = LearningStore(sqlite)
+
+    # 创建 3 个知识点
+    kp_limit = await store.upsert_knowledge_point("c1", "极限")
+    kp_diff = await store.upsert_knowledge_point("c1", "微分")
+    kp_integ = await store.upsert_knowledge_point("c1", "积分")
+
+    # 1. 插入 prerequisite 关系：极限 是 微分 的前置依赖
+    rel1 = await store.upsert_relation(
+        src_id=kp_limit["id"],
+        rel_type="prerequisite",
+        dst_id=kp_diff["id"],
+        metadata={"weight": 1.0},
+    )
+    assert rel1["rel_type"] == "prerequisite"
+
+    # 验证 dual-write: kp_prereq 存在记录 (kp_id=微分, prereq_id=极限)
+    cur_p = await sqlite.conn.execute("SELECT * FROM kp_prereq WHERE kp_id = ?", (kp_diff["id"],))
+    prereqs = await cur_p.fetchall()
+    assert len(prereqs) == 1
+    assert prereqs[0]["prereq_id"] == kp_limit["id"]
+
+    # 2. 插入 causal 与 similar 关系
+    await store.upsert_relation(
+        src_id=kp_diff["id"],
+        rel_type="causal",
+        dst_id=kp_integ["id"],
+        metadata={"note": "微积分基本定理连结微分与积分"},
+    )
+    await store.upsert_relation(
+        src_id=kp_diff["id"],
+        rel_type="similar",
+        dst_id=kp_integ["id"],
+    )
+
+    # 3. 查询关联边
+    out_edges = await store.get_relations(kp_id=kp_diff["id"], direction="out")
+    assert len(out_edges) == 2  # causal + similar
+    in_edges = await store.get_relations(kp_id=kp_diff["id"], direction="in")
+    assert len(in_edges) == 1   # prerequisite
+
+    # 4. 删除 prerequisite 关系 -> 同时自动清理 kp_prereq
+    deleted = await store.delete_relation(
+        src_id_or_id=kp_limit["id"],
+        rel_type="prerequisite",
+        dst_id=kp_diff["id"],
+    )
+    assert deleted is True
+    cur_p2 = await sqlite.conn.execute("SELECT * FROM kp_prereq WHERE kp_id = ?", (kp_diff["id"],))
+    assert len(await cur_p2.fetchall()) == 0
+
+    await sqlite.aclose()
+
+
+async def test_learning_api_relations_rollback_and_revisions(tmp_path: Path):
+    """验证 REST API: 关系建立/查询/删除、版本历史时间轴及回滚接口闭环。"""
+    from httpx import ASGITransport, AsyncClient
+
+    from app.core.container import AppContainer
+
+    settings = Settings(
+        offline_mode=True,
+        sqlite_path=tmp_path / "learn_api_m2.db",
+        data_dir=tmp_path / "data",
+    )
+    app = create_app(settings)
+    container = AppContainer(settings)
+    await container.initialize()
+    app.state.container = container
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            # 1. 创建两个知识点（包含出处元数据与原始引文）
+            r_kp1 = await client.post(
+                "/api/courses/cs_algo/knowledge",
+                json={
+                    "name": "二分查找",
+                    "summary": "有序数组对分检索",
+                    "raw_quote": "每次将搜索区间减半，时间复杂度 O(log n)。",
+                    "content": "前提：数组必须单调有序。",
+                    "provenance": {"doc_title": "algo.pdf", "page_start": 15},
+                },
+            )
+            assert r_kp1.status_code == 200
+            kp1_id = r_kp1.json()["id"]
+
+            r_kp2 = await client.post(
+                "/api/courses/cs_algo/knowledge",
+                json={
+                    "name": "二叉搜索树",
+                    "summary": "左小右大动态数据结构",
+                    "content": "支持动态增删查。",
+                    "prereq_ids": [kp1_id],
+                },
+            )
+            assert r_kp2.status_code == 200
+            kp2_id = r_kp2.json()["id"]
+
+            # 2. 建立因果语义连线 (POST /api/courses/{course_id}/knowledge/relations)
+            r_rel = await client.post(
+                "/api/courses/cs_algo/knowledge/relations",
+                json={
+                    "src_id": kp1_id,
+                    "rel_type": "causal",
+                    "dst_id": kp2_id,
+                    "metadata": {"reason": "二分思想推广到树结构"},
+                },
+            )
+            assert r_rel.status_code == 200
+            assert r_rel.json()["created"] is True
+
+            # 3. 查询单节点关联边与全课关联边
+            r_edges = await client.get(f"/api/courses/cs_algo/knowledge/{kp1_id}/relations")
+            assert r_edges.status_code == 200
+            assert r_edges.json()["count"] >= 1
+
+            r_all_edges = await client.get("/api/courses/cs_algo/knowledge/relations")
+            assert r_all_edges.status_code == 200
+            assert r_all_edges.json()["count"] >= 1
+
+            # 4. 更新知识点生成 v2，并获取历史版本列表
+            r_update = await client.post(
+                "/api/courses/cs_algo/knowledge",
+                json={
+                    "id": kp1_id,
+                    "name": "二分查找",
+                    "content": "注意边界条件：mid = left + (right - left) // 2 防止溢出。",
+                },
+            )
+            assert r_update.status_code == 200
+            assert r_update.json()["version"] == 2
+
+            r_revs = await client.get(f"/api/courses/cs_algo/knowledge/{kp1_id}/revisions")
+            assert r_revs.status_code == 200
+            assert r_revs.json()["count"] == 2
+
+            # 5. 回滚到 v1 (POST /api/courses/{course_id}/knowledge/{kp_id}/rollback)
+            r_rollback = await client.post(
+                f"/api/courses/cs_algo/knowledge/{kp1_id}/rollback",
+                json={"target_version": 1},
+            )
+            assert r_rollback.status_code == 200
+            assert r_rollback.json()["version"] == 3
+            assert r_rollback.json()["knowledge_point"]["content"] == "前提：数组必须单调有序。"
+
+            # 6. 删除语义连线
+            r_del = await client.delete(
+                "/api/courses/cs_algo/knowledge/relations",
+                params={"src_id": kp1_id, "rel_type": "causal", "dst_id": kp2_id},
+            )
+            assert r_del.status_code == 200
+            assert r_del.json()["deleted"] is True
+    finally:
+        await container.aclose()
+
 

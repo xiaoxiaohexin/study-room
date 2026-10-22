@@ -392,6 +392,19 @@ class ChatStore implements ChatStreamHost, ChatFlowsHost {
 			if (effort !== ReasoningEffort.OFF) apiOptions.reasoningEffort = effort;
 		}
 
+		// Knowledge Base / RAG namespace & Course ID binding (Milestone M4)
+		const ragNamespace = conversationsStore.preferences?.getRagNamespace?.();
+		if (ragNamespace) {
+			apiOptions.rag_namespace = ragNamespace;
+			apiOptions.ragNamespace = ragNamespace;
+		}
+
+		const courseId = conversationsStore.preferences?.getCourseId?.();
+		if (courseId) {
+			apiOptions.course_id = courseId;
+			apiOptions.courseId = courseId;
+		}
+
 		if (hasValue(currentConfig.temperature))
 			apiOptions.temperature = Number(currentConfig.temperature);
 

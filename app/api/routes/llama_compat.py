@@ -23,6 +23,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 from fastapi import APIRouter, Depends, Request, Response
@@ -144,6 +145,8 @@ async def _archive_dialogue_turn(
     images: list[str],
     elapsed_sec: float,
     is_tool_followup: bool = False,
+    course_id: str | None = None,
+    rag_namespace: str | None = None,
 ) -> None:
     """统一沉淀会话日志 (JSONL)、四层学情记忆与会话历史状态到数据库。"""
     if not query and not answer:
@@ -193,7 +196,16 @@ async def _archive_dialogue_turn(
 
     # 3. 写入 SessionStateManager (会话与历史消息隔离)
     try:
-        await container.state_manager.get_or_create_session(user_id=user_id, session_id=session_id)
+        sess = await container.state_manager.get_session(user_id=user_id, session_id=session_id)
+        if sess is None:
+            clean_ns = rag_namespace.strip() if rag_namespace and rag_namespace.strip() else "default"
+            clean_cid = course_id.strip() if course_id and course_id.strip() else None
+            await container.state_manager.get_or_create_session(
+                user_id=user_id,
+                session_id=session_id,
+                course_id=clean_cid,
+                rag_namespace=clean_ns,
+            )
         if not is_tool_followup and effective_query:
             await container.state_manager.append_message(
                 user_id=user_id,
@@ -241,8 +253,8 @@ async def _archive_dialogue_turn(
                 importance=0.75,
                 metadata={"images": img_refs},
             )
-        # 触发记忆整合
-        await container.memory_manager.consolidate(user_id)
+        # 触发记忆整合（仅当前会话作用域）
+        await container.memory_manager.consolidate(user_id, session_id=session_id)
     except Exception as e:  # noqa: BLE001
         log.warning("memory_manager_archive_failed", error=str(e))
 
@@ -292,15 +304,32 @@ async def _build_rag_and_memory_block(
     user_query: str,
     user_id: str,
     namespace: str,
-) -> tuple[str, list[dict[str, Any]]]:
-    """并行检索 RAG 教材切片、四层学情记忆与 SM-2 学习者画像，组装为精简上下文块。"""
+    session_id: str | None = None,
+    retrieval_mode: str = "local",
+    allow_web_fallback: bool = True,
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+    """并行检索 RAG 教材切片、四层学情记忆与 SM-2 学习者画像，组装为精简上下文块。
+
+    当本地 RAG 置信度不足且开启 ``WEB_FALLBACK_MODE=auto`` 时，会通过 MCP/搜索
+    Provider 联网补充，并把来源暂存到临时知识库（B 通道）。返回
+    ``(block, rag_sources, web_sources)``。
+    """
     if not user_query:
-        return "", []
+        return "", [], []
+    if retrieval_mode == "none":
+        log.info(
+            "retrieval_skipped",
+            query_preview=user_query[:60],
+            reason="route_policy",
+        )
+        return "", [], []
 
     s = container.settings
     tasks: list[Any] = [
         container.rag_retriever.search([user_query], namespace=namespace, top_k=s.rag_top_k),
-        container.memory_manager.retrieve_all([user_query], user_id=user_id, top_k=s.memory_top_k),
+        container.memory_manager.retrieve_all(
+            [user_query], user_id=user_id, top_k=s.memory_top_k, session_id=session_id
+        ),
     ]
     if container.learning_store is not None:
         tasks.append(container.learning_store.build_learner_profile_text(user_id=user_id))
@@ -324,13 +353,24 @@ async def _build_rag_and_memory_block(
         doc_lines = []
         for d in docs:
             hdr = f" ({' > '.join(d.headers)})" if d.headers else ""
-            doc_lines.append(f"[DOCUMENT: {d.filename}{hdr} | score={d.score:.2f}]\n{d.content}")
+            page_label = getattr(d, "page_label", None)
+            if not page_label:
+                p_start = getattr(d, "page_start", 1)
+                p_end = getattr(d, "page_end", p_start)
+                page_label = f"P.{p_start}" if p_start == p_end else f"P.{p_start}-{p_end}"
+
+            doc_lines.append(f"[DOCUMENT: {d.filename} {page_label}{hdr} | score={d.score:.2f}]\n{d.content}")
             rag_sources.append(
                 {
                     "id": d.id,
                     "filename": d.filename,
                     "headers": d.headers,
+                    "chunk_index": getattr(d, "chunk_index", 0),
+                    "page_start": getattr(d, "page_start", 1),
+                    "page_end": getattr(d, "page_end", 1),
+                    "page_label": page_label,
                     "score": round(d.score, 3),
+                    "content": d.content[:300] if hasattr(d, "content") else "",
                 }
             )
         sections.append("### [Retrieved Course Materials (RAG)]\n" + "\n\n".join(doc_lines))
@@ -339,14 +379,43 @@ async def _build_rag_and_memory_block(
         mem_lines = [f"[{sm.item.type.upper()} MEMORY] {sm.item.content}" for sm in memories]
         sections.append("### [Relevant Learner Memories]\n" + "\n".join(mem_lines))
 
+    # B 通道：本地知识库不足时联网补充，并自动暂存到临时知识库
+    web_sources: list[dict[str, Any]] = []
+    supplement = getattr(container, "web_supplement", None)
+    if allow_web_fallback and supplement is not None and supplement.enabled:
+        try:
+            confidence = await container.rag_retriever.confidence([user_query], namespace=namespace)
+            effective_local_count = sum(1 for d in docs if getattr(d, "score", 0.0) >= 0.40)
+            if supplement.insufficient(confidence, effective_local_count, query=user_query):
+                result = await supplement.supplement(
+                    user_query,
+                    session_id=session_id or "",
+                    user_id=user_id,
+                )
+                if result.get("block"):
+                    sections.append(str(result["block"]))
+                    web_sources = list(result.get("sources") or [])
+                    log.info(
+                        "web_supplement_used",
+                        namespace=namespace,
+                        local_docs=len(docs),
+                        max_similarity=round(float(confidence.get("max_similarity") or 0), 3),
+                        web_sources=len(web_sources),
+                        retrieval_mode=retrieval_mode,
+                    )
+        except Exception as exc:  # noqa: BLE001 - 联网补充失败必须降级为纯本地
+            log.warning("web_supplement_failed", error=str(exc))
+
     if not sections:
-        return "", []
+        return "", [], []
 
     header_instruction = (
         "以下是系统从本地知识库（RAG）与学情记忆库中自动检索到的背景资料，"
-        "请优先依据这些资料准确回答用户问题："
+        "请优先依据这些资料准确回答用户问题。"
+        "若出现 [WEB: ...] 标记，那是联网补充的外部资料，属于非权威来源，"
+        "引用时必须标注标题、URL 与抓取时间，且不得覆盖本地教材结论："
     )
-    return header_instruction + "\n\n" + "\n\n".join(sections), rag_sources
+    return header_instruction + "\n\n" + "\n\n".join(sections), rag_sources, web_sources
 
 
 def _fallback_props(container: AppContainer) -> dict[str, Any]:
@@ -636,16 +705,54 @@ async def llama_chat_completions(
         or request.headers.get("X-User-Id")
         or "default_user"
     )
-    session_id: str = str(
-        body.pop("session_id", None)
-        or request.headers.get("X-Conversation-Id")
-        or "webui_default"
+    header_rag_ns = request.headers.get("X-RAG-Namespace")
+    body_rag_ns = body.pop("rag_namespace", None)
+    header_course_id = request.headers.get("X-Course-Id")
+    body_course_id = body.pop("course_id", None)
+    session_id = str(body.pop("session_id", None) or request.headers.get("X-Conversation-Id") or "webui_default")
+
+    raw_header_ns = unquote(header_rag_ns) if header_rag_ns else None
+    clean_header_rag_ns = raw_header_ns.strip() if raw_header_ns and raw_header_ns.strip() else None
+    clean_body_rag_ns = str(body_rag_ns).strip() if body_rag_ns and str(body_rag_ns).strip() else None
+    raw_header_cid = unquote(header_course_id) if header_course_id else None
+    clean_header_course_id = raw_header_cid.strip() if raw_header_cid and raw_header_cid.strip() else None
+    clean_body_course_id = str(body_course_id).strip() if body_course_id and str(body_course_id).strip() else None
+
+    session = None
+    if session_id:
+        session = await container.state_manager.get_session(user_id=user_id, session_id=session_id)
+    if session is None:
+        session = await container.state_manager.get_or_create_session(
+            user_id=user_id,
+            session_id=session_id,
+            course_id=clean_body_course_id or clean_header_course_id,
+            rag_namespace=clean_body_rag_ns or clean_header_rag_ns,
+        )
+
+    clean_session_rag_ns = (
+        session.rag_namespace.strip()
+        if session and session.rag_namespace and session.rag_namespace.strip()
+        else None
     )
-    rag_namespace: str = str(
-        body.pop("rag_namespace", None)
-        or request.headers.get("X-RAG-Namespace")
+    clean_session_course_id = (
+        session.course_id.strip()
+        if session and session.course_id and session.course_id.strip()
+        else None
+    )
+
+    effective_rag_ns = (
+        clean_header_rag_ns
+        or clean_body_rag_ns
+        or clean_session_rag_ns
         or "default"
     )
+    effective_course_id = (
+        clean_header_course_id
+        or clean_body_course_id
+        or clean_session_course_id
+        or None
+    )
+
     enable_rag: bool = bool(body.pop("enable_rag", True))
     explicit_mode: str | None = body.pop("learning_mode", None) or request.headers.get("X-Learning-Mode")
 
@@ -676,12 +783,18 @@ async def llama_chat_completions(
     # 2. 执行自定义后端的 RAG + 四层记忆 + SM-2 学情画像并行检索
     rag_block = ""
     rag_sources: list[dict[str, Any]] = []
+    web_sources: list[dict[str, Any]] = []
     if enable_rag and effective_query and not is_tool_followup:
-        rag_block, rag_sources = await _build_rag_and_memory_block(
+        retrieval_mode = decision.retrieval_mode if decision else "none"
+        allow_web_fallback = decision.allow_web_fallback if decision else False
+        rag_block, rag_sources, web_sources = await _build_rag_and_memory_block(
             container=container,
             user_query=effective_query,
             user_id=user_id,
-            namespace=rag_namespace,
+            namespace=effective_rag_ns,
+            session_id=session_id,
+            retrieval_mode=retrieval_mode,
+            allow_web_fallback=allow_web_fallback,
         )
 
     # 3. KV Cache 友好注入上下文与当前模式系统提示词
@@ -690,18 +803,21 @@ async def llama_chat_completions(
         augmented_messages = _apply_intent_system_prompt(augmented_messages, decision)
 
     # 4. 根据当前模式精简暴露的工具集（防止 Gemma-4 E4B 工具选择过载）
-    if decision and decision.tool_names and "tools" in body and isinstance(body["tools"], list):
-        allowed_tools = set(decision.tool_names)
-        registered_tools = set(container.tool_registry._tools.keys())
-        pruned_tools = [
-            t
-            for t in body["tools"]
-            if (
-                t.get("function", {}).get("name") in allowed_tools
-                or t.get("function", {}).get("name") not in registered_tools
-            )
-        ]
-        body["tools"] = pruned_tools
+    if decision and "tools" in body and isinstance(body["tools"], list):
+        if not decision.expose_tools:
+            body["tools"] = []
+        elif decision.tool_names:
+            allowed_tools = set(decision.tool_names)
+            registered_tools = set(container.tool_registry._tools.keys())
+            pruned_tools = [
+                t
+                for t in body["tools"]
+                if (
+                    t.get("function", {}).get("name") in allowed_tools
+                    or t.get("function", {}).get("name") not in registered_tools
+                )
+            ]
+            body["tools"] = pruned_tools
 
     # 5. 合并 llama.cpp 原生扩展采样参数（前端已传的参数优先，未传的补齐默认值）
     upstream_payload: dict[str, Any] = {
@@ -732,6 +848,8 @@ async def llama_chat_completions(
         rag_hits=len(rag_sources),
         images_count=len(images),
         query_preview=effective_query[:60],
+        retrieval_mode=decision.retrieval_mode if decision else "followup",
+        web_allowed=decision.allow_web_fallback if decision else False,
     )
 
     start_time = time.time()
@@ -823,7 +941,7 @@ async def llama_chat_completions(
                             }
                         ],
                     }
-                    yield f"data: {json.dumps(sse_chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+                    yield f"data: {json.dumps(sse_chunk, ensure_ascii=False)}\n\n".encode()
                 yield b"data: [DONE]\n\n"
 
             # 异步沉淀全流程对话日志 (JSONL)、四层学情记忆与会话历史状态
@@ -845,6 +963,8 @@ async def llama_chat_completions(
                 images=images,
                 elapsed_sec=elapsed_sec,
                 is_tool_followup=is_tool_followup,
+                course_id=effective_course_id,
+                rag_namespace=effective_rag_ns,
             )
 
         return StreamingResponse(
@@ -855,7 +975,9 @@ async def llama_chat_completions(
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
                 "X-RAG-Hits": str(len(rag_sources)),
+                "X-Web-Sources": str(len(web_sources)),
                 "X-Learning-Mode": decision.mode if decision else "followup",
+                "X-Retrieval-Mode": decision.retrieval_mode if decision else "none",
             },
         )
 
@@ -892,12 +1014,16 @@ async def llama_chat_completions(
                     images=images,
                     elapsed_sec=elapsed_sec,
                     is_tool_followup=is_tool_followup,
+                    course_id=effective_course_id,
+                    rag_namespace=effective_rag_ns,
                 )
                 return JSONResponse(
                     content=data,
                     headers={
                         "X-RAG-Hits": str(len(rag_sources)),
+                        "X-Web-Sources": str(len(web_sources)),
                         "X-Learning-Mode": decision.mode if decision else "followup",
+                        "X-Retrieval-Mode": decision.retrieval_mode if decision else "none",
                     },
                 )
         except Exception as e:  # noqa: BLE001
@@ -929,6 +1055,8 @@ async def llama_chat_completions(
         images=images,
         elapsed_sec=elapsed_sec,
         is_tool_followup=is_tool_followup,
+        course_id=effective_course_id,
+        rag_namespace=effective_rag_ns,
     )
     return JSONResponse(
         content={
@@ -956,7 +1084,9 @@ async def llama_chat_completions(
         },
         headers={
             "X-RAG-Hits": str(len(rag_sources)),
+            "X-Web-Sources": str(len(web_sources)),
             "X-Learning-Mode": decision.mode if decision else "followup",
+            "X-Retrieval-Mode": decision.retrieval_mode if decision else "none",
         },
     )
 
@@ -984,6 +1114,37 @@ async def mcp_info(container: AppContainer = Depends(get_container)):
             for s in specs
         ],
     }
+
+
+async def _resolve_tool_scope(
+    container: AppContainer,
+    request: Request,
+    user_id: str,
+    session_id: str,
+) -> tuple[str, str | None]:
+    """Resolve the ``(rag_namespace, course_id)`` scope for tool execution.
+
+    Precedence matches the chat routes: explicit header > session binding > default.
+    """
+    session = None
+    if session_id:
+        try:
+            session = await container.state_manager.get_session(
+                user_id=user_id, session_id=session_id
+            )
+        except Exception:  # noqa: BLE001 - session lookup must never break tool calls
+            session = None
+
+    raw_header_ns = request.headers.get("X-RAG-Namespace")
+    header_ns = (unquote(raw_header_ns).strip() if raw_header_ns else "") or None
+    session_ns = (session.rag_namespace or "").strip() if session and session.rag_namespace else None
+    namespace = header_ns or session_ns or "default"
+
+    raw_header_course = request.headers.get("X-Course-Id")
+    header_course = (unquote(raw_header_course).strip() if raw_header_course else "") or None
+    session_course = (session.course_id or "").strip() if session and session.course_id else None
+    course_id = header_course or session_course or None
+    return namespace, course_id
 
 
 @router.post("/mcp")
@@ -1040,9 +1201,21 @@ async def mcp_jsonrpc_endpoint(
         tool_name = params.get("name", "")
         arguments = params.get("arguments") or {}
         user_id = str(arguments.pop("user_id", None) or request.headers.get("X-User-Id", "default_user"))
-        session_id = str(arguments.pop("session_id", None) or "mcp_session")
+        session_id = str(
+            arguments.pop("session_id", None)
+            or request.headers.get("X-Conversation-Id")
+            or "mcp_session"
+        )
 
-        ctx = ToolContext(user_id=user_id, session_id=session_id)
+        rag_namespace, course_id = await _resolve_tool_scope(
+            container, request, user_id, session_id
+        )
+        ctx = ToolContext(
+            user_id=user_id,
+            session_id=session_id,
+            rag_namespace=rag_namespace,
+            course_id=course_id,
+        )
         res = await container.tool_registry.execute(tool_name, arguments, ctx)
         if res.ok:
             try:
@@ -1109,8 +1282,18 @@ async def llama_webui_execute_tool(
     stream = bool(payload.get("stream", False))
 
     user_id = str(params.pop("user_id", None) or request.headers.get("X-User-Id", "default_user"))
-    session_id = str(params.pop("session_id", None) or "webui_tool_session")
-    ctx = ToolContext(user_id=user_id, session_id=session_id)
+    session_id = str(
+        params.pop("session_id", None)
+        or request.headers.get("X-Conversation-Id")
+        or "webui_tool_session"
+    )
+    rag_namespace, course_id = await _resolve_tool_scope(container, request, user_id, session_id)
+    ctx = ToolContext(
+        user_id=user_id,
+        session_id=session_id,
+        rag_namespace=rag_namespace,
+        course_id=course_id,
+    )
 
     res = await container.tool_registry.execute(tool_name, params, ctx)
     if res.ok:
@@ -1128,10 +1311,10 @@ async def llama_webui_execute_tool(
     if stream:
         async def _tool_sse() -> AsyncIterator[bytes]:
             if res.ok:
-                yield f"data: {json.dumps({'chunk': res.to_str()}, ensure_ascii=False)}\n\n".encode("utf-8")
+                yield f"data: {json.dumps({'chunk': res.to_str()}, ensure_ascii=False)}\n\n".encode()
                 yield b"data: {\"done\": true}\n\n"
             else:
-                yield f"data: {json.dumps({'done': True, 'error': res.error or 'Tool execution failed'}, ensure_ascii=False)}\n\n".encode("utf-8")
+                yield f"data: {json.dumps({'done': True, 'error': res.error or 'Tool execution failed'}, ensure_ascii=False)}\n\n".encode()
 
         return StreamingResponse(_tool_sse(), media_type="text/event-stream")
 

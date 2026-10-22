@@ -31,7 +31,13 @@ export const HEADERS = {
 	X_RESP_TYPE_HEADER: 'x-resp-type',
 
 	/** Header carrying the working directory a tool call runs in; the model cannot override it */
-	X_TOOL_CWD_HEADER: 'x-tool-cwd'
+	X_TOOL_CWD_HEADER: 'x-tool-cwd',
+
+	/** Header carrying RAG knowledge base namespace for isolation (Milestone M4) */
+	X_RAG_NAMESPACE_HEADER: 'X-RAG-Namespace',
+
+	/** Header carrying associated course ID for isolation (Milestone M4) */
+	X_COURSE_ID_HEADER: 'X-Course-Id'
 };
 
 /** `X_RESP_TYPE_HEADER` value that makes read_file return raw bytes as base64 instead of text. */

@@ -18,7 +18,6 @@ class RagTool(Tool):
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "检索关键词或问题"},
-            "namespace": {"type": "string", "description": "知识库命名空间（默认 default）"},
             "top_k": {"type": "integer", "description": "返回文档数量上限（默认 3）"},
         },
         "required": ["query"],
@@ -29,7 +28,9 @@ class RagTool(Tool):
 
     async def run(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         query = arguments.get("query", "").strip()
-        namespace = arguments.get("namespace", "default")
+        # Namespace always comes from the session scope; the model cannot select a
+        # different knowledge base (or probe arbitrary namespaces).
+        namespace = (context.rag_namespace or "default").strip() or "default"
         top_k = int(arguments.get("top_k", 3))
 
         log.info("rag_tool_invoked", query=query, namespace=namespace, top_k=top_k)
@@ -37,12 +38,43 @@ class RagTool(Tool):
             return ToolResult(ok=False, error="query cannot be empty")
 
         docs = await self.retriever.search([query], namespace=namespace, top_k=top_k)
-        if not docs:
-            return ToolResult(ok=True, output=f"在知识库 [{namespace}] 中未检索到与 '{query}' 相关的文档。")
+
+        staged_docs = []
+        try:
+            staged_docs = await self.retriever.search_staging(
+                [query], session_id=context.session_id, top_k=min(3, top_k)
+            )
+        except Exception as exc:
+            log.warning("rag_tool_staging_search_failed", error=str(exc))
 
         parts = []
         for d in docs:
             hdr = f" ({' > '.join(d.headers)})" if d.headers else ""
-            parts.append(f"### 文档: {d.filename}{hdr} (匹配分: {d.score:.2f})\n{d.content}")
+            low_notice = " [低匹配度提示：可能与查询主题无关]" if d.score < 0.40 else ""
+            parts.append(f"### 文档: {d.filename}{hdr} (匹配分: {d.score:.2f}){low_notice}\n{d.content}")
+
+        if staged_docs:
+            staged_parts = []
+            for sd in staged_docs:
+                if sd.score >= 0.30:
+                    url = sd.metadata.get("url") or "网页来源"
+                    staged_parts.append(
+                        f"### [临时暂存网页] {sd.filename} (来源: {url} | 匹配分: {sd.score:.2f})\n"
+                        f"{sd.content}\n"
+                        f"> 💡 提示：此内容已抓取暂存在临时库。若信息准确无误，可调用 web_tool(action='promote', doc_id='{sd.doc_id}') 提纯入库。"
+                    )
+            if staged_parts:
+                if parts:
+                    parts.append("--- 以下为【临时知识库暂存匹配】（联网抓取待提纯数据） ---")
+                parts.extend(staged_parts)
+
+        if not parts:
+            return ToolResult(
+                ok=True,
+                output=(
+                    f"在知识库 [{namespace}] 及临时暂存库中未检索到与 '{query}' 相关的文档。"
+                    "建议调用 web_tool 工具进行针对性联网搜索。"
+                ),
+            )
 
         return ToolResult(ok=True, output="\n\n---\n\n".join(parts))

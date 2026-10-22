@@ -27,6 +27,10 @@ export interface DatabaseConversation {
 	disabledToolCategories?: ToolSource[];
 	forkedFromConversationId?: string;
 	pinned?: boolean;
+	/** Knowledge base namespace bound to this conversation (defaults to 'default') */
+	ragNamespace?: string;
+	/** Course ID bound to this conversation */
+	courseId?: string;
 }
 
 export interface DatabaseMessageExtraAudioFile {

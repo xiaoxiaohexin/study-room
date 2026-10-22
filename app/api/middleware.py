@@ -41,8 +41,54 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class ApiTokenMiddleware(BaseHTTPMiddleware):
+    """Optional bearer-token guard. Disabled when ``api_token`` is empty.
+
+    This is defense-in-depth for exposing the local backend beyond 127.0.0.1;
+    the default single-user local setup keeps working with no token.
+    """
+
+    _EXEMPT_PATHS = {"/health"}
+
+    def __init__(self, app, token: str | None = None):
+        super().__init__(app)
+        self._token = (token or "").strip() or None
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        if (
+            self._token is None
+            or request.method == "OPTIONS"
+            or request.url.path in self._EXEMPT_PATHS
+        ):
+            return await call_next(request)
+
+        authorization = request.headers.get("Authorization", "")
+        provided = ""
+        if authorization.lower().startswith("bearer "):
+            provided = authorization[7:].strip()
+        if not provided:
+            provided = request.headers.get("X-API-Token", "").strip()
+
+        if provided != self._token:
+            log.warning("api_token_rejected", path=request.url.path, method=request.method)
+            err = ErrorResponse(
+                code=401,
+                error="Unauthorized",
+                detail="Missing or invalid API token",
+                request_id=request_id_var.get(),
+            )
+            return JSONResponse(status_code=401, content=err.model_dump())
+        return await call_next(request)
+
+
 def setup_middlewares(app: FastAPI, settings: Settings) -> None:
-    # 1. CORS 中间件
+    # 1. 可选 API Token 鉴权（在 CORS 之前注册，使 CORS 位于最外层并能处理预检）
+    token = settings.api_token.get_secret_value() if settings.api_token else None
+    app.add_middleware(ApiTokenMiddleware, token=token)
+    if token:
+        log.info("api_token_authentication_enabled")
+
+    # 2. CORS 中间件
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -51,10 +97,10 @@ def setup_middlewares(app: FastAPI, settings: Settings) -> None:
         allow_headers=["*"],
     )
 
-    # 2. 请求上下文与日志追踪中间件
+    # 3. 请求上下文与日志追踪中间件
     app.add_middleware(RequestContextMiddleware)
 
-    # 3. 统一参数验证异常拦截 (HTTP 422 -> 400 规范化)
+    # 4. 统一参数验证异常拦截 (HTTP 422 -> 400 规范化)
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError):
         req_id = request_id_var.get()

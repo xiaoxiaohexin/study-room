@@ -135,6 +135,41 @@ export async function convertPDFToImage(file: File, scale: number = 1.5): Promis
 	}
 }
 
+/** Total number of pages in a PDF file (browser-only). */
+export async function getPDFPageCount(file: File): Promise<number> {
+	if (!browser) {
+		throw new Error('PDF processing is only available in the browser');
+	}
+	const buffer = await getFileAsBuffer(file);
+	const doc = await pdfjs.getDocument({ data: buffer }).promise;
+	return doc.numPages;
+}
+
+/** Render a single PDF page to a PNG data URL (browser-only). */
+export async function renderPDFPageToImage(
+	file: File,
+	pageNumber: number,
+	scale: number = 1.5
+): Promise<string> {
+	if (!browser) {
+		throw new Error('PDF processing is only available in the browser');
+	}
+	const buffer = await getFileAsBuffer(file);
+	const doc = await pdfjs.getDocument({ data: buffer }).promise;
+	const clamped = Math.min(Math.max(1, Math.floor(pageNumber) || 1), doc.numPages);
+	const page = await doc.getPage(clamped);
+	const viewport = page.getViewport({ scale });
+	const canvas = document.createElement('canvas');
+	const ctx = canvas.getContext('2d');
+	canvas.width = viewport.width;
+	canvas.height = viewport.height;
+	if (!ctx) {
+		throw new Error('Failed to get 2D context from canvas');
+	}
+	await page.render({ canvas, canvasContext: ctx, viewport }).promise;
+	return canvas.toDataURL(MimeTypeImage.PNG);
+}
+
 /**
  * Check if a file is a PDF based on its MIME type
  * @param file - The file to check

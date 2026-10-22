@@ -5,18 +5,22 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from app.learning.algorithms import compute_sm2, score_to_quality, update_mastery_ema
 from app.observability.logging import get_logger
 from app.storage.sqlite import SQLiteStore
 
+if TYPE_CHECKING:
+    from app.storage.graph import GraphStore
+
 log = get_logger(__name__)
 
 
 class LearningStore:
-    def __init__(self, sqlite: SQLiteStore):
+    def __init__(self, sqlite: SQLiteStore, graph_store: GraphStore | None = None):
         self.sqlite = sqlite
+        self.graph_store = graph_store
 
     # ==================== 课程管理 ====================
     async def create_course(
@@ -51,6 +55,78 @@ class LearningStore:
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
+    async def ensure_course(
+        self,
+        user_id: str,
+        course_id: str | None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        """Ensure a course row exists for the given (user, course_id).
+
+        The frontend may bind preset course ids (e.g. ``math_calc``) that were never
+        explicitly created. ``default`` is a virtual course and never gets a row, so
+        knowledge points under it stay scoped by ``user_id`` only.
+        """
+        cid = (course_id or "default").strip() or "default"
+        if cid == "default":
+            return {
+                "id": "default",
+                "user_id": user_id,
+                "name": "默认课程",
+                "namespace": "default",
+                "description": "",
+                "virtual": True,
+            }
+
+        cur = await self.sqlite.conn.execute("SELECT * FROM courses WHERE id = ?", (cid,))
+        row = await cur.fetchone()
+        if row is not None:
+            if row["user_id"] != user_id:
+                raise PermissionError(f"Course '{cid}' belongs to another user")
+            return dict(row)
+
+        now = time.time()
+        try:
+            await self.sqlite.conn.execute(
+                "INSERT INTO courses (id, user_id, name, namespace, description, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (cid, user_id, name or cid, cid, "", now),
+            )
+            await self.sqlite.conn.commit()
+        except Exception as exc:  # noqa: BLE001 - concurrent creation race
+            if "UNIQUE" not in str(exc).upper() and "PRIMARY" not in str(exc).upper():
+                raise
+            cur = await self.sqlite.conn.execute("SELECT * FROM courses WHERE id = ?", (cid,))
+            row = await cur.fetchone()
+            if row is None:
+                raise
+            if row["user_id"] != user_id:
+                raise PermissionError(f"Course '{cid}' belongs to another user") from exc
+            return dict(row)
+        return {
+            "id": cid,
+            "user_id": user_id,
+            "name": name or cid,
+            "namespace": cid,
+            "description": "",
+            "created_at": now,
+        }
+
+    async def _get_owned_kp(
+        self, kp_id: str, user_id: str
+    ) -> dict[str, Any] | None:
+        """Fetch a knowledge point only when it belongs to ``user_id``."""
+        cur = await self.sqlite.conn.execute(
+            "SELECT id, user_id, course_id FROM knowledge_points WHERE id = ?",
+            (kp_id,),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        if (row["user_id"] or "default_user") != user_id:
+            raise PermissionError(f"Knowledge point '{kp_id}' belongs to another user")
+        return dict(row)
+
     # ==================== 知识点管理 ====================
     async def upsert_knowledge_point(
         self,
@@ -59,58 +135,669 @@ class LearningStore:
         summary: str = "",
         difficulty: float = 0.5,
         prereq_ids: list[str] | None = None,
+        *,
+        kp_id: str | None = None,
+        raw_quote: str = "",
+        content: str = "",
+        provenance_dict: dict[str, Any] | None = None,
+        provenance: dict[str, Any] | None = None,
+        user_id: str = "default_user",
+        relations: list[dict[str, Any]] | None = None,
+        change_type: str | None = None,
     ) -> dict[str, Any]:
-        cur = await self.sqlite.conn.execute(
-            "SELECT * FROM knowledge_points WHERE course_id = ? AND name = ?",
-            (course_id, name),
-        )
-        existing = await cur.fetchone()
+        prov = provenance_dict if provenance_dict is not None else (provenance or {})
+        prov_json = json.dumps(prov, ensure_ascii=False)
         now = time.time()
-        if existing:
-            kp_id = existing["id"]
-            await self.sqlite.conn.execute(
-                "UPDATE knowledge_points SET summary = ?, difficulty = ? WHERE id = ?",
-                (summary or existing["summary"], difficulty, kp_id),
+        diff = min(1.0, max(0.1, float(difficulty)))
+
+        # Auto-register explicit (non-default) course ids and verify ownership.
+        await self.ensure_course(user_id, course_id)
+
+        if kp_id:
+            cur = await self.sqlite.conn.execute(
+                "SELECT * FROM knowledge_points WHERE id = ?", (kp_id,)
             )
         else:
-            kp_id = f"kp_{uuid.uuid4().hex[:10]}"
-            await self.sqlite.conn.execute(
-                "INSERT INTO knowledge_points (id, course_id, name, summary, difficulty, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (kp_id, course_id, name, summary, difficulty, now),
+            cur = await self.sqlite.conn.execute(
+                "SELECT * FROM knowledge_points WHERE course_id = ? AND name = ? AND user_id = ?",
+                (course_id, name, user_id),
             )
+        existing = await cur.fetchone()
+
+        if existing is not None:
+            existing_user = existing["user_id"] or "default_user"
+            if existing_user != user_id:
+                raise PermissionError(f"Knowledge point '{existing['id']}' belongs to another user")
+            existing_course = existing["course_id"] or "default"
+            if existing_course != (course_id or "default"):
+                raise ValueError(
+                    f"Knowledge point '{existing['id']}' belongs to course '{existing_course}', "
+                    "refusing cross-course update"
+                )
+
+        if existing is None:
+            target_id = kp_id or f"kp_{uuid.uuid4().hex[:10]}"
+            init_version = 1
+            init_content = content or summary or ""
+            init_raw_quote = raw_quote or ""
+            init_summary = summary or (init_content[:200] if init_content else "")
+            initial_snapshot = {
+                "version": 1,
+                "timestamp": now,
+                "content": init_content,
+                "raw_quote": init_raw_quote,
+                "summary": init_summary,
+                "change_type": change_type or "create",
+                "changeType": change_type or "create",
+            }
+            history = [initial_snapshot]
+            init_history_json = json.dumps(history, ensure_ascii=False)
+
+            await self.sqlite.conn.execute(
+                """
+                INSERT INTO knowledge_points (
+                    id, course_id, user_id, name, summary, difficulty,
+                    raw_quote, content, version, provenance_json, history_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    target_id,
+                    course_id,
+                    user_id,
+                    name,
+                    init_summary,
+                    diff,
+                    init_raw_quote,
+                    init_content,
+                    init_version,
+                    prov_json,
+                    init_history_json,
+                    now,
+                    now,
+                ),
+            )
+            await self.sqlite.conn.execute(
+                """
+                INSERT INTO mastery (
+                    user_id, kp_id, mastery, ef, interval_days, repetitions, next_review_at, updated_at
+                ) VALUES (?, ?, 0.3, 2.5, 1.0, 0, ?, ?)
+                ON CONFLICT(user_id, kp_id) DO NOTHING
+                """,
+                (user_id, target_id, now, now),
+            )
+            final_summary = init_summary
+            final_raw_quote = init_raw_quote
+            final_content = init_content
+            final_version = init_version
+            final_prov = prov
+            final_created_at = now
+        else:
+            target_id = existing["id"]
+            existing_raw = existing["raw_quote"] or ""
+            final_raw_quote = existing_raw if existing_raw else (raw_quote or "")
+
+            if content:
+                final_content = content
+            elif summary and not (existing["content"] or ""):
+                final_content = summary
+            else:
+                final_content = existing["content"] or existing["summary"] or ""
+
+            final_summary = summary or existing["summary"] or ""
+
+            if prov:
+                final_prov = prov
+                final_prov_json = prov_json
+            else:
+                try:
+                    final_prov = json.loads(existing["provenance_json"] or "{}")
+                except Exception:
+                    final_prov = {}
+                final_prov_json = existing["provenance_json"] or "{}"
+
+            curr_version = int(existing["version"] or 1)
+            final_version = curr_version + 1
+
+            try:
+                history = json.loads(existing["history_json"] or "[]")
+                if not isinstance(history, list):
+                    history = []
+            except Exception:
+                history = []
+
+            if not history:
+                history.append({
+                    "version": curr_version,
+                    "timestamp": existing["created_at"] or now,
+                    "content": existing["content"] or existing["summary"] or "",
+                    "raw_quote": existing["raw_quote"] or "",
+                    "summary": existing["summary"] or "",
+                    "change_type": "create",
+                    "changeType": "create",
+                })
+
+            new_snapshot = {
+                "version": final_version,
+                "timestamp": now,
+                "content": final_content,
+                "raw_quote": final_raw_quote,
+                "summary": final_summary,
+                "change_type": change_type or "edit",
+                "changeType": change_type or "edit",
+            }
+            history.append(new_snapshot)
+            final_history_json = json.dumps(history, ensure_ascii=False)
+
+            await self.sqlite.conn.execute(
+                """
+                UPDATE knowledge_points SET
+                    name = ?,
+                    summary = ?,
+                    difficulty = ?,
+                    raw_quote = ?,
+                    content = ?,
+                    version = ?,
+                    provenance_json = ?,
+                    history_json = ?,
+                    updated_at = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (
+                    name,
+                    final_summary,
+                    diff,
+                    final_raw_quote,
+                    final_content,
+                    final_version,
+                    final_prov_json,
+                    final_history_json,
+                    now,
+                    target_id,
+                    user_id,
+                ),
+            )
+            await self.sqlite.conn.execute(
+                """
+                INSERT INTO mastery (
+                    user_id, kp_id, mastery, ef, interval_days, repetitions, next_review_at, updated_at
+                ) VALUES (?, ?, 0.3, 2.5, 1.0, 0, ?, ?)
+                ON CONFLICT(user_id, kp_id) DO NOTHING
+                """,
+                (user_id, target_id, now, now),
+            )
+            final_created_at = existing["created_at"] or now
+
+        # Prerequisite relations dual-write
         if prereq_ids:
             for pid in prereq_ids:
+                if not pid or pid == target_id:
+                    continue
+                # Cross-user prerequisite links are never allowed (dangling ids stay allowed
+                # so offline canvas edges can be reconciled later).
+                try:
+                    await self._get_owned_kp(pid, user_id)
+                except PermissionError:
+                    log.warning(
+                        "cross_user_prereq_rejected",
+                        kp_id=target_id,
+                        prereq_id=pid,
+                        user_id=user_id,
+                    )
+                    continue
                 await self.sqlite.conn.execute(
                     "INSERT OR IGNORE INTO kp_prereq (kp_id, prereq_id) VALUES (?, ?)",
-                    (kp_id, pid),
+                    (target_id, pid),
                 )
+                rel_id = f"rel_prereq_{pid}_{target_id}"
+                await self.sqlite.conn.execute(
+                    """
+                    INSERT INTO kp_relations (id, src_id, rel_type, dst_id, user_id, metadata_json, created_at)
+                    VALUES (?, ?, 'prerequisite', ?, ?, '{}', ?)
+                    ON CONFLICT(src_id, rel_type, dst_id) DO NOTHING
+                    """,
+                    (rel_id, pid, target_id, user_id, now),
+                )
+                if self.graph_store:
+                    try:
+                        await self.graph_store.upsert_relation(
+                            user_id=user_id,
+                            src=pid,
+                            rel="prerequisite",
+                            dst=target_id,
+                        )
+                    except Exception as e:
+                        log.warning("graph_store_prereq_sync_failed", error=str(e))
+
+        # Batch relations sync
+        if relations:
+            for rel in relations:
+                s_id = rel.get("src_id") or target_id
+                d_id = rel.get("dst_id")
+                r_type = rel.get("rel_type") or "prerequisite"
+                r_meta = rel.get("metadata") or {}
+                if s_id and d_id and s_id != d_id:
+                    await self.upsert_relation(
+                        src_id=s_id,
+                        rel_type=r_type,
+                        dst_id=d_id,
+                        metadata=r_meta,
+                        user_id=user_id,
+                        course_id=course_id,
+                    )
+
         await self.sqlite.conn.commit()
         return {
-            "id": kp_id,
+            "id": target_id,
             "course_id": course_id,
+            "user_id": user_id,
             "name": name,
-            "summary": summary,
-            "difficulty": difficulty,
+            "summary": final_summary,
+            "difficulty": diff,
+            "raw_quote": final_raw_quote,
+            "content": final_content,
+            "version": final_version,
+            "provenance": final_prov,
+            "history": history,
+            "prereq_ids": prereq_ids or [],
+            "created_at": final_created_at,
+            "updated_at": now,
         }
 
-    async def list_knowledge_points(self, course_id: str | None = None) -> list[dict[str, Any]]:
-        if course_id:
-            cur = await self.sqlite.conn.execute(
-                "SELECT * FROM knowledge_points WHERE course_id = ? ORDER BY created_at ASC",
-                (course_id,),
-            )
-        else:
-            cur = await self.sqlite.conn.execute("SELECT * FROM knowledge_points ORDER BY created_at ASC")
-        rows = await cur.fetchall()
-        return [dict(r) for r in rows]
-
-    async def get_knowledge_point(self, kp_id_or_name: str, course_id: str = "default") -> dict[str, Any] | None:
+    async def rollback_knowledge_point(
+        self, kp_id: str, target_version: int, *, user_id: str = "default_user"
+    ) -> dict[str, Any]:
         cur = await self.sqlite.conn.execute(
-            "SELECT * FROM knowledge_points WHERE id = ? OR (name = ? AND course_id = ?) OR name = ?",
-            (kp_id_or_name, kp_id_or_name, course_id, kp_id_or_name),
+            "SELECT * FROM knowledge_points WHERE id = ? AND user_id = ?", (kp_id, user_id)
         )
         row = await cur.fetchone()
-        return dict(row) if row else None
+        if not row:
+            raise KeyError(f"Knowledge point '{kp_id}' not found")
+
+        try:
+            history = json.loads(row["history_json"] or "[]")
+            if not isinstance(history, list):
+                history = []
+        except Exception:
+            history = []
+
+        target_snapshot = next((s for s in history if int(s.get("version", -1)) == int(target_version)), None)
+        if not target_snapshot:
+            raise ValueError(f"Target version {target_version} does not exist in history of '{kp_id}'")
+
+        curr_version = int(row["version"] or 1)
+        next_version = curr_version + 1
+        now = time.time()
+
+        target_content = target_snapshot.get("content", "")
+        target_raw_quote = target_snapshot.get("raw_quote", row["raw_quote"] or "")
+        target_summary = target_snapshot.get("summary", row["summary"] or "")
+
+        rollback_snapshot = {
+            "version": next_version,
+            "timestamp": now,
+            "content": target_content,
+            "raw_quote": target_raw_quote,
+            "summary": target_summary,
+            "change_type": f"rollback_to_v{target_version}",
+            "changeType": "rollback",
+            "target_version": target_version,
+        }
+        history.append(rollback_snapshot)
+
+        await self.sqlite.conn.execute(
+            """
+            UPDATE knowledge_points SET
+                content = ?,
+                raw_quote = ?,
+                summary = ?,
+                version = ?,
+                history_json = ?,
+                updated_at = ?
+            WHERE id = ? AND user_id = ?
+            """,
+            (
+                target_content,
+                target_raw_quote,
+                target_summary,
+                next_version,
+                json.dumps(history, ensure_ascii=False),
+                now,
+                kp_id,
+                user_id,
+            ),
+        )
+        await self.sqlite.conn.commit()
+
+        prov = {}
+        try:
+            prov = json.loads(row["provenance_json"] or "{}")
+        except Exception:
+            pass
+
+        return {
+            "id": kp_id,
+            "course_id": row["course_id"],
+            "name": row["name"],
+            "summary": target_summary,
+            "difficulty": float(row["difficulty"]),
+            "raw_quote": target_raw_quote,
+            "content": target_content,
+            "version": next_version,
+            "history": history,
+            "provenance": prov,
+            "updated_at": now,
+        }
+
+    async def upsert_relation(
+        self,
+        src_id: str,
+        rel_type: str,
+        dst_id: str,
+        metadata: dict[str, Any] | None = None,
+        *,
+        rel_id: str | None = None,
+        user_id: str = "default_user",
+        course_id: str | None = None,
+    ) -> dict[str, Any]:
+        valid_types = {"prerequisite", "causal", "similar", "branch_followup"}
+        if rel_type not in valid_types:
+            raise ValueError(f"Invalid rel_type '{rel_type}'. Must be one of {valid_types}")
+
+        # Ownership / course consistency: existing endpoints must belong to the same
+        # user and the same course. Dangling endpoints stay allowed so offline canvas
+        # edges can be reconciled once the knowledge points land.
+        owned_courses: list[str] = []
+        for endpoint in (src_id, dst_id):
+            owned = await self._get_owned_kp(endpoint, user_id)
+            if owned is not None:
+                owned_courses.append(owned["course_id"] or "default")
+        if len(set(owned_courses)) > 1:
+            raise ValueError(
+                f"Cross-course relation rejected: {src_id} and {dst_id} belong to "
+                f"different courses {sorted(set(owned_courses))}"
+            )
+        expected_course = course_id.strip() if course_id and course_id.strip() else None
+        if (
+            expected_course
+            and expected_course not in {"default", "all"}
+            and owned_courses
+            and any(c != expected_course for c in owned_courses)
+        ):
+            raise ValueError(
+                f"Knowledge points do not belong to course '{expected_course}'"
+            )
+
+        rid = rel_id or f"rel_{uuid.uuid4().hex[:10]}"
+        now = time.time()
+        meta_json = json.dumps(metadata or {}, ensure_ascii=False)
+
+        await self.sqlite.conn.execute(
+            """
+            INSERT INTO kp_relations (id, src_id, rel_type, dst_id, user_id, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(src_id, rel_type, dst_id) DO UPDATE SET
+                metadata_json = excluded.metadata_json
+            """,
+            (rid, src_id, rel_type, dst_id, user_id, meta_json, now),
+        )
+
+        if rel_type == "prerequisite":
+            await self.sqlite.conn.execute(
+                "INSERT OR IGNORE INTO kp_prereq (kp_id, prereq_id) VALUES (?, ?)",
+                (dst_id, src_id),
+            )
+
+        if self.graph_store:
+            try:
+                await self.graph_store.upsert_relation(
+                    user_id=user_id,
+                    src=src_id,
+                    rel=rel_type,
+                    dst=dst_id,
+                    **(metadata or {}),
+                )
+            except Exception as e:
+                log.warning("graph_store_relation_sync_failed", error=str(e))
+
+        await self.sqlite.conn.commit()
+        return {
+            "id": rid,
+            "src_id": src_id,
+            "rel_type": rel_type,
+            "dst_id": dst_id,
+            "user_id": user_id,
+            "metadata": metadata or {},
+            "created_at": now,
+        }
+
+    async def get_relations(
+        self,
+        kp_id: str,
+        rel_type: str | None = None,
+        direction: Literal["out", "in", "all"] = "all",
+        *,
+        user_id: str = "default_user",
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = ["user_id = ?"]
+        params: list[Any] = [user_id]
+
+        if direction == "out":
+            clauses.append("src_id = ?")
+            params.append(kp_id)
+        elif direction == "in":
+            clauses.append("dst_id = ?")
+            params.append(kp_id)
+        else:
+            clauses.append("(src_id = ? OR dst_id = ?)")
+            params.extend([kp_id, kp_id])
+
+        if rel_type:
+            clauses.append("rel_type = ?")
+            params.append(rel_type)
+
+        where_sql = " AND ".join(clauses)
+        cur = await self.sqlite.conn.execute(
+            f"SELECT * FROM kp_relations WHERE {where_sql} ORDER BY created_at DESC",
+            tuple(params),
+        )
+        rows = await cur.fetchall()
+        results: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["metadata"] = json.loads(d.pop("metadata_json", "{}") or "{}")
+            except Exception:
+                d["metadata"] = {}
+            results.append(d)
+        return results
+
+    async def list_course_relations(
+        self,
+        course_id: str | None = None,
+        rel_type: str | None = None,
+        *,
+        user_id: str = "default_user",
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = ["user_id = ?"]
+        params: list[Any] = [user_id]
+
+        if course_id:
+            clauses.append(
+                "(src_id IN (SELECT id FROM knowledge_points WHERE course_id = ? AND user_id = ?) "
+                "OR dst_id IN (SELECT id FROM knowledge_points WHERE course_id = ? AND user_id = ?))"
+            )
+            params.extend([course_id, user_id, course_id, user_id])
+
+        if rel_type:
+            clauses.append("rel_type = ?")
+            params.append(rel_type)
+
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        cur = await self.sqlite.conn.execute(
+            f"SELECT * FROM kp_relations {where_sql} ORDER BY created_at DESC",
+            tuple(params),
+        )
+        rows = await cur.fetchall()
+        results: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["metadata"] = json.loads(d.pop("metadata_json", "{}") or "{}")
+            except Exception:
+                d["metadata"] = {}
+            results.append(d)
+        return results
+
+    async def delete_relation(
+        self,
+        src_id_or_id: str,
+        rel_type: str | None = None,
+        dst_id: str | None = None,
+        *,
+        user_id: str = "default_user",
+    ) -> bool:
+        if rel_type is None and dst_id is None:
+            cur_find = await self.sqlite.conn.execute(
+                "SELECT src_id, rel_type, dst_id FROM kp_relations WHERE id = ? AND user_id = ?",
+                (src_id_or_id, user_id),
+            )
+            row = await cur_find.fetchone()
+            if not row:
+                return False
+            src_id, rel_type, dst_id = row["src_id"], row["rel_type"], row["dst_id"]
+            cur = await self.sqlite.conn.execute(
+                "DELETE FROM kp_relations WHERE id = ? AND user_id = ?",
+                (src_id_or_id, user_id),
+            )
+        else:
+            src_id = src_id_or_id
+            cur = await self.sqlite.conn.execute(
+                "DELETE FROM kp_relations WHERE src_id = ? AND rel_type = ? AND dst_id = ? AND user_id = ?",
+                (src_id, rel_type, dst_id, user_id),
+            )
+
+        if rel_type == "prerequisite" and dst_id:
+            await self.sqlite.conn.execute(
+                "DELETE FROM kp_prereq WHERE kp_id = ? AND prereq_id = ?",
+                (dst_id, src_id),
+            )
+
+        await self.sqlite.conn.commit()
+        return cur.rowcount > 0
+
+    async def get_revisions(
+        self, kp_id: str, *, user_id: str = "default_user"
+    ) -> list[dict[str, Any]]:
+        cur = await self.sqlite.conn.execute(
+            "SELECT history_json, version, content, raw_quote, summary, created_at, updated_at "
+            "FROM knowledge_points WHERE id = ? AND user_id = ?",
+            (kp_id, user_id),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return []
+        try:
+            history = json.loads(row["history_json"] or "[]")
+            if isinstance(history, list) and history:
+                return history
+        except Exception:
+            pass
+        return [{
+            "version": int(row["version"] or 1),
+            "timestamp": row["updated_at"] or row["created_at"] or time.time(),
+            "content": row["content"] or "",
+            "raw_quote": row["raw_quote"] or "",
+            "summary": row["summary"] or "",
+            "change_type": "create",
+            "changeType": "create",
+        }]
+
+    async def list_knowledge_points(
+        self, course_id: str | None = None, *, user_id: str = "default_user"
+    ) -> list[dict[str, Any]]:
+        if course_id:
+            cur = await self.sqlite.conn.execute(
+                "SELECT * FROM knowledge_points WHERE course_id = ? AND user_id = ? "
+                "ORDER BY created_at ASC",
+                (course_id, user_id),
+            )
+        else:
+            cur = await self.sqlite.conn.execute(
+                "SELECT * FROM knowledge_points WHERE user_id = ? ORDER BY created_at ASC",
+                (user_id,),
+            )
+        rows = await cur.fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["provenance"] = json.loads(d.pop("provenance_json", "{}") or "{}")
+            except Exception:
+                d["provenance"] = {}
+            try:
+                d["history"] = json.loads(d.pop("history_json", "[]") or "[]")
+            except Exception:
+                d["history"] = []
+            out.append(d)
+        return out
+
+    async def get_knowledge_point(
+        self,
+        kp_id_or_name: str,
+        course_id: str = "default",
+        *,
+        user_id: str = "default_user",
+    ) -> dict[str, Any] | None:
+        cur = await self.sqlite.conn.execute(
+            "SELECT * FROM knowledge_points WHERE user_id = ? "
+            "AND (id = ? OR (name = ? AND course_id = ?))",
+            (user_id, kp_id_or_name, kp_id_or_name, course_id),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["provenance"] = json.loads(d.pop("provenance_json", "{}") or "{}")
+        except Exception:
+            d["provenance"] = {}
+        try:
+            d["history"] = json.loads(d.pop("history_json", "[]") or "[]")
+        except Exception:
+            d["history"] = []
+
+        cur_p = await self.sqlite.conn.execute(
+            "SELECT prereq_id FROM kp_prereq WHERE kp_id = ?", (d["id"],)
+        )
+        p_rows = await cur_p.fetchall()
+        d["prereq_ids"] = [r["prereq_id"] for r in p_rows]
+        return d
+
+    async def delete_knowledge_point(
+        self, kp_id: str, *, user_id: str = "default_user"
+    ) -> bool:
+        """Delete a knowledge point plus its relations, prerequisite links and mastery rows."""
+        cur = await self.sqlite.conn.execute(
+            "SELECT id FROM knowledge_points WHERE id = ? AND user_id = ?", (kp_id, user_id)
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return False
+
+        await self.sqlite.conn.execute(
+            "DELETE FROM kp_prereq WHERE kp_id = ? OR prereq_id = ?", (kp_id, kp_id)
+        )
+        await self.sqlite.conn.execute(
+            "DELETE FROM kp_relations WHERE src_id = ? OR dst_id = ?", (kp_id, kp_id)
+        )
+        await self.sqlite.conn.execute("DELETE FROM mastery WHERE kp_id = ?", (kp_id,))
+        await self.sqlite.conn.execute(
+            "DELETE FROM knowledge_points WHERE id = ? AND user_id = ?", (kp_id, user_id)
+        )
+        await self.sqlite.conn.commit()
+        log.info("knowledge_point_deleted", kp_id=kp_id, user_id=user_id)
+        return True
 
     # ==================== 题库与出题 ====================
     async def add_question(

@@ -2,6 +2,7 @@
 	import { SkipForward, Square } from '@lucide/svelte';
 	import { page } from '$app/state';
 	import {
+		ChatFormActionKnowledgeBase,
 		ChatFormActionReasoning,
 		ChatFormActionRecord,
 		ChatFormActionsAdd,
@@ -163,6 +164,8 @@
 		{#if hasProcessedTokens}
 			<ChatFormContextGauge />
 		{/if}
+
+		<ChatFormActionKnowledgeBase {disabled} />
 
 		{#if showModelSelector}
 			<ChatFormActionReasoning />

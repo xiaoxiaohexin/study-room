@@ -56,12 +56,15 @@ class SemanticMemory(BaseMemory):
         log.info("semantic_memory_added", user_id=item.user_id, memory_id=item.id, entities=len(entities))
         return item.id
 
-    async def retrieve(self, query: str, user_id: str, top_k: int = 5) -> list[ScoredMemory]:
+    async def retrieve(
+        self, query: str, user_id: str, top_k: int = 5, session_id: str | None = None
+    ) -> list[ScoredMemory]:
         await self._ensure_store()
         vecs = await self.embedder.embed([query])
         if not vecs:
             return []
 
+        # 语义记忆全局共享：以 user_id 过滤，不限制 session_id
         scored_pts = await self.vector_store.search(
             self.collection_name,
             vector=vecs[0],
@@ -111,18 +114,35 @@ class SemanticMemory(BaseMemory):
 
         scored.sort(key=lambda s: s.score, reverse=True)
         res = scored[:top_k]
-        log.debug("semantic_memory_retrieved", user_id=user_id, count=len(res))
+        log.debug("semantic_memory_retrieved", user_id=user_id, session_id=session_id, count=len(res))
         return res
 
-    async def remove(self, ids: list[str]) -> None:
+    async def remove(
+        self,
+        ids: list[str],
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+    ) -> None:
         if not ids:
             return
         await self._ensure_store()
-        await self.vector_store.delete(self.collection_name, ids)
-        for i in ids:
+        owned = [
+            i
+            for i in ids
+            if i in self._items and (user_id is None or self._items[i].user_id == user_id)
+        ]
+        if user_id is not None and not owned:
+            return
+        delete_ids = owned if user_id is not None else ids
+        await self.vector_store.delete(self.collection_name, delete_ids)
+        for i in delete_ids:
             self._items.pop(i, None)
-        log.info("semantic_memories_removed", count=len(ids))
+        log.info("semantic_memories_removed", count=len(delete_ids), user_id=user_id)
 
-    async def list_items(self, user_id: str, limit: int = 50) -> list[MemoryItem]:
+    async def list_items(
+        self, user_id: str, limit: int = 50, session_id: str | None = None
+    ) -> list[MemoryItem]:
+        # 语义记忆属于全局概念图谱，跨会话完整返回
         items = [it for it in self._items.values() if it.user_id == user_id]
         return sorted(items, key=lambda x: x.created_at, reverse=True)[:limit]

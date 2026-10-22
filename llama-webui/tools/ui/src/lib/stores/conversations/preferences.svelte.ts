@@ -83,6 +83,12 @@ export class ConversationPreferences {
 	/** Global (non-conversation-specific) reasoning effort default */
 	pendingReasoningEffort = $state<ReasoningEffort>(loadReasoningEffortDefault());
 
+	/** Pending RAG knowledge base namespace picked on new-chat screen */
+	pendingRagNamespace = $state<string>('default');
+
+	/** Pending course ID picked on new-chat screen */
+	pendingCourseId = $state<string | null>(null);
+
 	private get _disabledToolCategories(): Set<ToolSource> {
 		return buildDisabledToolCategories(this.host.activeConversation);
 	}
@@ -127,6 +133,30 @@ export class ConversationPreferences {
 		}
 
 		return this.pendingReasoningEffort;
+	}
+
+	/**
+	 * Gets the effective RAG knowledge base namespace for the active conversation.
+	 * Returns active conversation `ragNamespace` if set, otherwise `pendingRagNamespace || 'default'`.
+	 */
+	getRagNamespace(): string {
+		if (this.host.activeConversation?.ragNamespace) {
+			return this.host.activeConversation.ragNamespace;
+		}
+
+		return this.pendingRagNamespace || 'default';
+	}
+
+	/**
+	 * Gets the associated course ID for the active conversation.
+	 * Returns active conversation `courseId` if set, otherwise `pendingCourseId`.
+	 */
+	getCourseId(): string | undefined {
+		if (this.host.activeConversation?.courseId) {
+			return this.host.activeConversation.courseId;
+		}
+
+		return this.pendingCourseId ?? undefined;
 	}
 
 	/** Defaults snapshot for seeding a newly created conversation. */
@@ -200,6 +230,8 @@ export class ConversationPreferences {
 	resetPending(): void {
 		this.pendingReasoningEffort = loadReasoningEffortDefault();
 		this.pendingCwd = null;
+		this.pendingRagNamespace = 'default';
+		this.pendingCourseId = null;
 	}
 
 	// Working Directory
@@ -235,6 +267,56 @@ export class ConversationPreferences {
 		});
 
 		this.pendingCwd = null;
+	}
+
+	// Knowledge Base (RAG Namespace) & Course Binding
+
+	/**
+	 * Sets the RAG knowledge base namespace for the active conversation, or buffers into
+	 * `pendingRagNamespace` on the new-chat screen.
+	 *
+	 * @param value - Target knowledge base namespace (defaults to 'default')
+	 * @param courseId - Optional course ID to update simultaneously
+	 */
+	async setRagNamespace(value: string | null, courseId?: string | null): Promise<void> {
+		const trimmed = value?.trim() || 'default';
+		const trimmedCourse = courseId !== undefined ? (courseId?.trim() || undefined) : undefined;
+
+		if (!this.host.activeConversation) {
+			this.pendingRagNamespace = trimmed;
+			if (courseId !== undefined) {
+				this.pendingCourseId = courseId?.trim() || null;
+			}
+			return;
+		}
+
+		const id = this.host.activeConversation.id;
+		const updates: Partial<DatabaseConversation> = { ragNamespace: trimmed };
+		if (courseId !== undefined) {
+			updates.courseId = trimmedCourse;
+		}
+
+		this.host.applyConversationUpdate(id, updates);
+		await DatabaseService.updateConversation(id, updates);
+	}
+
+	/**
+	 * Sets the associated course ID for the active conversation, or buffers into
+	 * `pendingCourseId` on the new-chat screen.
+	 *
+	 * @param value - Associated course ID, or null to clear
+	 */
+	async setCourseId(value: string | null): Promise<void> {
+		const trimmed = value?.trim() || undefined;
+
+		if (!this.host.activeConversation) {
+			this.pendingCourseId = trimmed ?? null;
+			return;
+		}
+
+		const id = this.host.activeConversation.id;
+		this.host.applyConversationUpdate(id, { courseId: trimmed });
+		await DatabaseService.updateConversation(id, { courseId: trimmed });
 	}
 
 	// Reasoning Effort

@@ -6,7 +6,9 @@
 		Database,
 		FileText,
 		FileUp,
+		Globe,
 		HardDrive,
+		Inbox,
 		Layers,
 		Loader2,
 		RefreshCw,
@@ -18,7 +20,25 @@
 	import { Button } from '$lib/components/ui/button';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import { Input } from '$lib/components/ui/input';
-	import { deviceStore } from '$lib/stores';
+	import { conversationsStore, deviceStore } from '$lib/stores';
+	import { getActiveCourseId, getActiveRagNamespace, learningHeaders } from '$lib/services/learning-context';
+	import {
+		deleteStagingDocument,
+		distillStagingDocument,
+		getWebStatus,
+		listStagingCandidates,
+		listStagingDocuments,
+		previewUrl,
+		promoteStaging,
+		rejectStagingCandidate,
+		revokePromotion,
+		searchWeb,
+		stageUrl,
+		type StagingCandidate,
+		type StagingDocument,
+		type WebPreviewResult,
+		type WebStatus
+	} from '$lib/services/web-staging.service';
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 
@@ -54,8 +74,10 @@
 		headers?: string[];
 	}
 
-	let activeTab = $state<'list' | 'upload' | 'test'>('upload');
-	let namespace = $state('default');
+	let activeTab = $state<'list' | 'upload' | 'test' | 'web' | 'staging'>('upload');
+	// Default to the knowledge base bound to the active conversation so uploading
+	// and browsing do not silently target a different namespace.
+	let namespace = $state(getActiveRagNamespace());
 	let stats = $state<RagStats | null>(null);
 	let documents = $state<IngestedDoc[]>([]);
 	let loadingDocs = $state(false);
@@ -76,20 +98,235 @@
 	// Deleting doc state
 	let deletingDocId = $state<string | null>(null);
 
+	// 联网导入 / 临时知识库状态
+	let webStatus = $state<WebStatus | null>(null);
+	let webUrl = $state('');
+	let webQuery = $state('');
+	let webPreview = $state<WebPreviewResult | null>(null);
+	let webBusy = $state(false);
+	let stagingDocuments = $state<StagingDocument[]>([]);
+	let stagingCandidates = $state<StagingCandidate[]>([]);
+	let stagingBusy = $state(false);
+	let promoting = $state(false);
+	let stagingCourseId = $state(getActiveCourseId());
+	let selectedCandidateIds = $state<string[]>([]);
+
+	function stagingSessionId(): string {
+		return conversationsStore.activeConversation?.id ?? 'manual_import';
+	}
+
 	function handleOpenChange(value: boolean) {
 		open = value;
 		onOpenChange?.(value);
 		if (value) {
+			namespace = getActiveRagNamespace();
+			stagingCourseId = getActiveCourseId();
 			void loadAllData();
+			void loadWebStatus();
+			void loadStagingData();
+		}
+	}
+
+	async function loadWebStatus() {
+		try {
+			webStatus = await getWebStatus();
+		} catch (err) {
+			console.warn('Failed to load web status:', err);
+			webStatus = null;
+		}
+	}
+
+	async function loadStagingData() {
+		stagingBusy = true;
+		try {
+			const [docs, candidates] = await Promise.all([
+				listStagingDocuments({ limit: 100 }),
+				listStagingCandidates({ status: 'pending', limit: 100 })
+			]);
+			stagingDocuments = docs.documents;
+			stagingCandidates = candidates.candidates;
+		} catch (err) {
+			console.warn('Failed to load staging data:', err);
+		} finally {
+			stagingBusy = false;
+		}
+	}
+
+	async function handleWebPreview() {
+		const url = webUrl.trim();
+		if (!url) {
+			toast.error('请输入网页地址');
+			return;
+		}
+		webBusy = true;
+		webPreview = null;
+		try {
+			webPreview = await previewUrl(url);
+		} catch (err) {
+			toast.error(err instanceof Error ? err.message : String(err));
+		} finally {
+			webBusy = false;
+		}
+	}
+
+	async function handleWebStage() {
+		if (!webPreview) return;
+		webBusy = true;
+		try {
+			const result = await stageUrl(webPreview.final_url || webPreview.url, {
+				sessionId: stagingSessionId(),
+				conversationId: conversationsStore.activeConversation?.id ?? '',
+				query: webQuery.trim(),
+				targetCourseId: stagingCourseId
+			});
+			toast.success(
+				result.document.reused
+					? '该网页内容已在临时知识库中（自动去重）'
+					: '已存入临时知识库，等待提纯晋升'
+			);
+			webPreview = null;
+			webUrl = '';
+			await loadStagingData();
+			activeTab = 'staging';
+		} catch (err) {
+			toast.error(err instanceof Error ? err.message : String(err));
+		} finally {
+			webBusy = false;
+		}
+	}
+
+	async function handleWebSearchStage() {
+		const query = webQuery.trim();
+		if (!query) {
+			toast.error('请输入联网搜索关键词');
+			return;
+		}
+		webBusy = true;
+		try {
+			const result = await searchWeb(query, {
+				topK: 3,
+				stage: true,
+				sessionId: stagingSessionId()
+			});
+			const count = result.staged?.length ?? 0;
+			const provider = result.results?.[0]?.provider;
+			const source = provider ? `（搜索源：${provider}）` : '';
+			toast.success(
+				count > 0
+					? `搜索完成${source}，已抓取 ${count} 篇网页存入临时知识库`
+					: `搜索完成${source}，但未成功抓取到网页`
+			);
+			await loadStagingData();
+			if (count > 0) activeTab = 'staging';
+		} catch (err) {
+			toast.error(err instanceof Error ? err.message : String(err));
+		} finally {
+			webBusy = false;
+		}
+	}
+
+	async function handleDistill(doc: StagingDocument) {
+		stagingBusy = true;
+		try {
+			const result = await distillStagingDocument(doc.doc_id);
+			toast.success(`已提纯出 ${result.candidates.length} 个知识候选（质量分 ${(result.quality_score * 100).toFixed(0)}）`);
+			await loadStagingData();
+		} catch (err) {
+			toast.error(err instanceof Error ? err.message : String(err));
+		} finally {
+			stagingBusy = false;
+		}
+	}
+
+	async function handleDeleteStaging(doc: StagingDocument) {
+		if (!confirm(`确定丢弃临时文档「${doc.title}」吗？`)) return;
+		stagingBusy = true;
+		try {
+			await deleteStagingDocument(doc.doc_id);
+			toast.success('已丢弃临时文档');
+			await loadStagingData();
+		} catch (err) {
+			toast.error(err instanceof Error ? err.message : String(err));
+		} finally {
+			stagingBusy = false;
+		}
+	}
+
+	function toggleCandidate(id: string) {
+		selectedCandidateIds = selectedCandidateIds.includes(id)
+			? selectedCandidateIds.filter((item) => item !== id)
+			: [...selectedCandidateIds, id];
+	}
+
+	async function handlePromote() {
+		const selected = stagingCandidates.filter((c) => selectedCandidateIds.includes(c.id));
+		const docIds = Array.from(new Set(selected.map((c) => c.doc_id)));
+		if (selected.length === 0) {
+			toast.error('请先勾选要晋升的提纯候选');
+			return;
+		}
+		promoting = true;
+		try {
+			const result = await promoteStaging({
+				stagingDocIds: docIds,
+				candidateIds: selectedCandidateIds,
+				targetCourseId: stagingCourseId.trim() || 'default'
+			});
+			if (result.ok) {
+				toast.success(
+					`已晋升 ${result.promoted_documents.length} 篇文档 / ${result.promoted_knowledge_points.length} 个知识节点到「${result.target_namespace}」`
+				);
+			} else {
+				toast.warning(`部分晋升失败：${result.errors.join('；')}`);
+			}
+			selectedCandidateIds = [];
+			await loadStagingData();
+			await loadAllData();
+		} catch (err) {
+			toast.error(err instanceof Error ? err.message : String(err));
+		} finally {
+			promoting = false;
+		}
+	}
+
+	async function handleRejectCandidate(candidate: StagingCandidate) {
+		try {
+			await rejectStagingCandidate(candidate.id);
+			toast.success('已驳回该候选');
+			await loadStagingData();
+		} catch (err) {
+			toast.error(err instanceof Error ? err.message : String(err));
+		}
+	}
+
+	async function handleRevoke(doc: StagingDocument) {
+		if (!confirm(`确定撤销「${doc.title}」的晋升吗？对应标准文档与知识节点会被删除。`)) return;
+		stagingBusy = true;
+		try {
+			const result = await revokePromotion(doc.doc_id);
+			toast.success(
+				`已撤销晋升（删除文档 ${result.removed_doc_id || '无'}，知识节点 ${result.revoked_knowledge_points.length} 个）`
+			);
+			await loadStagingData();
+			await loadAllData();
+		} catch (err) {
+			toast.error(err instanceof Error ? err.message : String(err));
+		} finally {
+			stagingBusy = false;
 		}
 	}
 
 	async function loadAllData() {
 		loadingDocs = true;
 		try {
+			const authHeaders = learningHeaders();
 			const [statsRes, docsRes] = await Promise.all([
-				fetch(`/api/rag/stats?namespace=${encodeURIComponent(namespace)}`),
-				fetch(`/api/rag/documents?namespace=${encodeURIComponent(namespace)}`)
+				fetch(`/api/rag/stats?namespace=${encodeURIComponent(namespace)}`, {
+					headers: authHeaders
+				}),
+				fetch(`/api/rag/documents?namespace=${encodeURIComponent(namespace)}`, {
+					headers: authHeaders
+				})
 			]);
 
 			if (statsRes.ok) {
@@ -141,6 +378,7 @@
 
 			const resp = await fetch('/api/rag/ingest', {
 				body: formData,
+				headers: learningHeaders(),
 				method: 'POST'
 			});
 
@@ -181,7 +419,7 @@
 		try {
 			const resp = await fetch(
 				`/api/rag/documents/${encodeURIComponent(doc.doc_id)}?namespace=${encodeURIComponent(namespace)}`,
-				{ method: 'DELETE' }
+				{ method: 'DELETE', headers: learningHeaders() }
 			);
 
 			if (!resp.ok) {
@@ -218,7 +456,8 @@
 					top_k: 5
 				}),
 				headers: {
-					'Content-Type': 'application/json'
+					'Content-Type': 'application/json',
+					...learningHeaders()
 				},
 				method: 'POST'
 			});
@@ -277,6 +516,8 @@
 	$effect(() => {
 		if (open) {
 			void loadAllData();
+			void loadWebStatus();
+			void loadStagingData();
 		}
 	});
 </script>
@@ -407,7 +648,31 @@
 				type="button"
 			>
 				<Search class="h-3.5 w-3.5 text-sky-500" />
-				<span>检索效果验证测试</span>
+				<span>检索测试</span>
+			</button>
+
+			<button
+				class="flex flex-1 items-center justify-center gap-1.5 rounded-lg py-1.5 text-xs font-medium transition-all {activeTab ===
+				'web'
+					? 'bg-background text-foreground shadow-xs font-semibold'
+					: 'text-muted-foreground hover:text-foreground'}"
+				onclick={() => (activeTab = 'web')}
+				type="button"
+			>
+				<Globe class="h-3.5 w-3.5 text-indigo-500" />
+				<span>联网导入{webStatus?.enabled ? '' : '（未开启）'}</span>
+			</button>
+
+			<button
+				class="flex flex-1 items-center justify-center gap-1.5 rounded-lg py-1.5 text-xs font-medium transition-all {activeTab ===
+				'staging'
+					? 'bg-background text-foreground shadow-xs font-semibold'
+					: 'text-muted-foreground hover:text-foreground'}"
+				onclick={() => (activeTab = 'staging')}
+				type="button"
+			>
+				<Inbox class="h-3.5 w-3.5 text-amber-500" />
+				<span>临时知识库 ({stagingDocuments.length})</span>
 			</button>
 		</div>
 
@@ -641,6 +906,263 @@
 									<p class="text-[12px] leading-relaxed text-foreground/90 whitespace-pre-wrap font-sans">
 										{item.content}
 									</p>
+								</div>
+							{/each}
+						{/if}
+					</div>
+				</div>
+			<!-- TAB 4: WEB IMPORT -->
+			{:else if activeTab === 'web'}
+				<div class="space-y-3">
+					{#if !webStatus?.enabled}
+						<div class="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-700 dark:text-amber-300">
+							<AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
+							<div>
+								<p class="font-semibold">联网功能未开启</p>
+								<p class="mt-0.5 text-[11px] leading-relaxed">
+									在项目根目录 .env 中设置 <code class="rounded bg-muted px-1">WEB_ENABLED=true</code> 并重启后端；
+									如需搜索发现，再配置 <code class="rounded bg-muted px-1">WEB_SEARCH_PROVIDER</code> 或
+									<code class="rounded bg-muted px-1">MCP_WEB_SERVER_URL</code>。
+								</p>
+							</div>
+						</div>
+					{/if}
+
+					{#if webStatus?.enabled}
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-border/60 bg-muted/30 px-2.5 py-1.5 text-[11px] text-muted-foreground">
+							<Globe class="h-3 w-3 shrink-0 text-indigo-500" />
+							<span>
+								搜索源：{webStatus.search_providers?.length
+									? webStatus.search_providers.join(' → ')
+									: '未配置'}
+							</span>
+							{#if webStatus.search_base_url}
+								<span class="font-mono">{webStatus.search_base_url}</span>
+							{/if}
+							{#if webStatus.mcp_configured}
+								<span>· MCP 已配置（需服务在线）</span>
+							{/if}
+							{#if !webStatus.search_available}
+								<span class="text-amber-600 dark:text-amber-400">
+									· 搜索不可用（仍可直接粘贴 URL 抓取）
+								</span>
+							{/if}
+						</div>
+					{/if}
+
+					<div class="flex gap-2">
+						<Input
+							bind:value={webUrl}
+							class="text-xs"
+							onkeydown={(e) => e.key === 'Enter' && handleWebPreview()}
+							placeholder="粘贴网页 URL（https://…），抓取正文后存入临时知识库…"
+						/>
+						<Button
+							class="gap-1.5 shrink-0 text-xs"
+							disabled={webBusy || !webStatus?.enabled}
+							onclick={handleWebPreview}
+						>
+							{#if webBusy}
+								<Loader2 class="h-3.5 w-3.5 animate-spin" />
+							{:else}
+								<Globe class="h-3.5 w-3.5" />
+							{/if}
+							<span>抓取预览</span>
+						</Button>
+					</div>
+
+					{#if webPreview}
+						<div class="space-y-2 rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-3">
+							<div class="flex flex-wrap items-center justify-between gap-2">
+								<div class="min-w-0">
+									<p class="truncate text-xs font-semibold text-foreground">{webPreview.title}</p>
+									<p class="truncate font-mono text-[10px] text-muted-foreground">
+										{webPreview.final_url} · {webPreview.chars} 字
+									</p>
+								</div>
+								<Button
+									class="h-7 shrink-0 gap-1 text-[11px]"
+									disabled={webBusy}
+									onclick={handleWebStage}
+									size="sm"
+								>
+									<Inbox class="h-3.5 w-3.5" />
+									<span>存入临时知识库</span>
+								</Button>
+							</div>
+							<pre class="max-h-56 overflow-y-auto whitespace-pre-wrap rounded-lg border border-border/60 bg-background/80 p-2 font-serif text-[11px] leading-relaxed text-foreground/85">{webPreview.preview}</pre>
+						</div>
+					{/if}
+
+					<div class="flex gap-2 border-t border-border/60 pt-3">
+						<Input
+							bind:value={webQuery}
+							class="text-xs"
+							onkeydown={(e) => e.key === 'Enter' && handleWebSearchStage()}
+							placeholder="联网搜索关键词（需配置搜索 Provider 或 MCP 搜索服务）…"
+						/>
+						<Button
+							class="gap-1.5 shrink-0 text-xs"
+							disabled={webBusy || !webStatus?.enabled || !webStatus?.search_available}
+							onclick={handleWebSearchStage}
+							size="sm"
+							variant="secondary"
+						>
+							<Search class="h-3.5 w-3.5" />
+							<span>搜索并暂存</span>
+						</Button>
+					</div>
+
+					<p class="text-[11px] text-muted-foreground">
+						说明：联网资料只会进入「临时知识库」，不会直接污染正式知识库；提纯成候选后由你确认晋升。
+						网页抓取已做内网/回环地址拦截与大小限制。
+					</p>
+				</div>
+
+			<!-- TAB 5: STAGING / INBOX -->
+			{:else if activeTab === 'staging'}
+				<div class="space-y-3">
+					<div class="flex flex-wrap items-center gap-2">
+						<Input
+							bind:value={stagingCourseId}
+							class="h-8 max-w-56 text-xs"
+							placeholder="目标课程 ID（默认 default）"
+						/>
+						<Button class="h-8 gap-1.5 text-xs" disabled={stagingBusy} onclick={loadStagingData} size="sm" variant="outline">
+							<RefreshCw class="h-3.5 w-3.5 {stagingBusy ? 'animate-spin' : ''}" />
+							<span>刷新临时库</span>
+						</Button>
+						<span class="text-[11px] text-muted-foreground">
+							TTL {webStatus?.staging_ttl_days ?? 7} 天自动清理 · 晋升默认人工确认
+						</span>
+					</div>
+
+					<!-- Staged documents -->
+					<div class="space-y-2">
+						<div class="flex items-center gap-1.5 text-[11px] font-semibold text-muted-foreground">
+							<Inbox class="h-3.5 w-3.5 text-amber-500" />
+							<span>待整理网页（{stagingDocuments.length}）</span>
+						</div>
+						{#if stagingDocuments.length === 0}
+							<div class="rounded-xl border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+								暂无临时资料。可在「联网导入」抓取网页，或让聊天智能体在本地资料不足时自动补充。
+							</div>
+						{:else}
+							{#each stagingDocuments as doc (doc.doc_id)}
+								<div class="rounded-xl border border-border/80 bg-muted/20 p-2.5">
+									<div class="flex flex-wrap items-center justify-between gap-2">
+										<div class="min-w-0">
+											<p class="truncate text-xs font-semibold text-foreground">{doc.title}</p>
+											<div class="flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+												<span class="rounded bg-indigo-500/10 px-1.5 py-0.5 font-mono text-indigo-600 dark:text-indigo-300">
+													{doc.source_type === 'web' ? '🌐 网页' : '本地'}
+												</span>
+												<span class="rounded bg-muted px-1.5 py-0.5 font-mono">{doc.status}</span>
+												{#if doc.quality_score > 0}
+													<span class="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-emerald-600 dark:text-emerald-300">
+														质量 {(doc.quality_score * 100).toFixed(0)}
+													</span>
+												{/if}
+												<span class="truncate">{doc.url || doc.origin}</span>
+											</div>
+										</div>
+										<div class="flex shrink-0 items-center gap-1">
+											<Button
+												class="h-7 gap-1 px-2 text-[11px]"
+												disabled={stagingBusy || doc.status === 'promoted'}
+												onclick={() => handleDistill(doc)}
+												size="sm"
+												variant="secondary"
+											>
+												<Sparkles class="h-3 w-3" />
+												<span>提纯</span>
+											</Button>
+											{#if doc.status === 'promoted'}
+												<Button
+													class="h-7 gap-1 px-2 text-[11px]"
+													disabled={stagingBusy}
+													onclick={() => handleRevoke(doc)}
+													size="sm"
+													variant="outline"
+												>
+													<span>撤销晋升</span>
+												</Button>
+											{:else}
+												<Button
+													class="h-7 gap-1 px-2 text-[11px] text-muted-foreground"
+													disabled={stagingBusy}
+													onclick={() => handleDeleteStaging(doc)}
+													size="sm"
+													variant="ghost"
+												>
+													<Trash2 class="h-3 w-3" />
+													<span>丢弃</span>
+												</Button>
+											{/if}
+										</div>
+									</div>
+								</div>
+							{/each}
+						{/if}
+					</div>
+
+					<!-- Distilled candidates -->
+					<div class="space-y-2 border-t border-border/60 pt-3">
+						<div class="flex items-center justify-between gap-2">
+							<div class="flex items-center gap-1.5 text-[11px] font-semibold text-muted-foreground">
+								<Sparkles class="h-3.5 w-3.5 text-emerald-500" />
+								<span>待入库知识候选（{stagingCandidates.length}）</span>
+							</div>
+							<Button
+								class="h-7 gap-1 px-2 text-[11px]"
+								disabled={promoting || selectedCandidateIds.length === 0}
+								onclick={handlePromote}
+								size="sm"
+							>
+								{#if promoting}
+									<Loader2 class="h-3 w-3 animate-spin" />
+								{:else}
+									<CheckCircle2 class="h-3 w-3" />
+								{/if}
+								<span>晋升到正式库 ({selectedCandidateIds.length})</span>
+							</Button>
+						</div>
+						{#if stagingCandidates.length === 0}
+							<div class="rounded-xl border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+								暂无待入库候选。对临时网页点击「提纯」后会生成知识节点候选。
+							</div>
+						{:else}
+							{#each stagingCandidates as candidate (candidate.id)}
+								<div class="flex items-start gap-2 rounded-xl border border-border/80 bg-card/60 p-2.5">
+									<input
+										aria-label="选择候选 {candidate.title}"
+										checked={selectedCandidateIds.includes(candidate.id)}
+										class="mt-1 h-3.5 w-3.5"
+										onchange={() => toggleCandidate(candidate.id)}
+										type="checkbox"
+									/>
+									<div class="min-w-0 flex-1">
+										<div class="flex flex-wrap items-center gap-1.5">
+											<span class="truncate text-xs font-semibold text-foreground">{candidate.title}</span>
+											<span class="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[10px] text-emerald-600 dark:text-emerald-300">
+												质量 {(candidate.quality_score * 100).toFixed(0)}
+											</span>
+											{#if candidate.source_title}
+												<span class="truncate text-[10px] text-muted-foreground">来自：{candidate.source_title}</span>
+											{/if}
+										</div>
+										<p class="mt-0.5 line-clamp-2 text-[11px] leading-relaxed text-muted-foreground">
+											{candidate.summary}
+										</p>
+									</div>
+									<Button
+										class="h-7 shrink-0 px-2 text-[11px] text-muted-foreground"
+										onclick={() => handleRejectCandidate(candidate)}
+										size="sm"
+										variant="ghost"
+									>
+										驳回
+									</Button>
 								</div>
 							{/each}
 						{/if}

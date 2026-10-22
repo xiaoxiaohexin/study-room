@@ -38,16 +38,26 @@ class BaseMemory(ABC):
         ...
 
     @abstractmethod
-    async def retrieve(self, query: str, user_id: str, top_k: int = 5) -> list[ScoredMemory]:
+    async def retrieve(
+        self, query: str, user_id: str, top_k: int = 5, session_id: str | None = None
+    ) -> list[ScoredMemory]:
         """检索相关记忆。"""
         ...
 
     @abstractmethod
-    async def remove(self, ids: list[str]) -> None:
-        """删除记忆。"""
+    async def remove(
+        self,
+        ids: list[str],
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+    ) -> None:
+        """删除记忆（可选按 user/session 归属过滤，避免误删其他作用域）。"""
         ...
 
     @abstractmethod
-    async def list_items(self, user_id: str, limit: int = 50) -> list[MemoryItem]:
+    async def list_items(
+        self, user_id: str, limit: int = 50, session_id: str | None = None
+    ) -> list[MemoryItem]:
         """获取记忆列表。"""
         ...

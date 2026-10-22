@@ -26,6 +26,22 @@ async def _background_memory_maintenance(container: AppContainer, interval_sec: 
         log.info("background_memory_maintenance_worker_stopped")
 
 
+async def _background_staging_maintenance(container: AppContainer, interval_sec: int = 3600) -> None:
+    """定期清理超过 TTL 的临时知识库文档（不阻塞启动）。"""
+    log.info("staging_cleanup_worker_started", interval_sec=interval_sec)
+    try:
+        # 启动后稍等再首次清理，避免和容器的其它初始化竞争
+        await asyncio.sleep(30)
+        while True:
+            try:
+                await container.web_staging.cleanup_expired()
+            except Exception as e:  # noqa: BLE001 - 清理失败不影响服务
+                log.warning("staging_cleanup_failed", error=str(e))
+            await asyncio.sleep(interval_sec)
+    except asyncio.CancelledError:
+        log.info("staging_cleanup_worker_stopped")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
@@ -39,16 +55,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     bg_task = asyncio.create_task(
         _background_memory_maintenance(container, settings.lifecycle_interval_seconds)
     )
+    staging_task = asyncio.create_task(_background_staging_maintenance(container))
 
     log.info("fastapi_startup_ready")
     try:
         yield
     finally:
         log.info("fastapi_shutdown_begun")
-        bg_task.cancel()
-        try:
-            await bg_task
-        except asyncio.CancelledError:
-            pass
+        for task in (bg_task, staging_task):
+            task.cancel()
+        for task in (bg_task, staging_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         await container.aclose()
         log.info("fastapi_shutdown_completed")

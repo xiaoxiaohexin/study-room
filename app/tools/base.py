@@ -14,6 +14,9 @@ class ToolContext(BaseModel):
     user_id: str
     session_id: str | None = None
     workspace_dir: str = "data"
+    # Session-scoped retrieval scope: tools must never reach outside these bindings.
+    rag_namespace: str = "default"
+    course_id: str | None = None
 
 
 class ToolResult(BaseModel):

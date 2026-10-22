@@ -28,6 +28,7 @@ export {
 	getMessageSiblings,
 	buildSiblingInfoMap
 } from './branching';
+export { buildTurnIndexMap, type TurnIndexEntry } from './turn-index';
 
 // Code
 export {

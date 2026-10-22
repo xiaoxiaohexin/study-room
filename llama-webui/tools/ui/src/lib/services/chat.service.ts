@@ -1028,6 +1028,8 @@ export class ChatService {
 		const {
 			backend_sampling,
 			continueFinalMessage,
+			course_id,
+			courseId,
 			custom,
 			// Config options
 			disableReasoningParsing,
@@ -1053,12 +1055,16 @@ export class ChatService {
 			onTimings,
 			onToolCallChunk,
 			presence_penalty,
+			rag_namespace,
+			ragNamespace,
 			reasoningEffort,
 			// Penalty parameters
 			repeat_last_n,
 			repeat_penalty,
 			// Other parameters
 			samplers,
+			session_id,
+			sessionId,
 			stream,
 			// Generation parameters
 			temperature,
@@ -1123,6 +1129,22 @@ export class ChatService {
 			stream,
 			tools: tools && tools.length > 0 ? tools : undefined
 		};
+
+		const effectiveSessionId = conversationId ?? session_id ?? sessionId;
+		const effectiveRagNamespace = (rag_namespace ?? ragNamespace)?.trim();
+		const effectiveCourseId = (course_id ?? courseId)?.trim();
+
+		if (effectiveSessionId) {
+			requestBody.session_id = effectiveSessionId;
+		}
+
+		if (effectiveRagNamespace) {
+			requestBody.rag_namespace = effectiveRagNamespace;
+		}
+
+		if (effectiveCourseId) {
+			requestBody.course_id = effectiveCourseId;
+		}
 
 		// Include model in request if provided (required in ROUTER mode)
 		if (options.model) {
@@ -1228,6 +1250,16 @@ export class ChatService {
 				// persist the pending stream before the fetch: a reload during the model load or
 				// the prompt processing must still find its way back to the session once it exists
 				ChatService.saveStreamState(conversationId, 0, options.model ?? null);
+			} else if (effectiveSessionId) {
+				headers[HEADERS.X_CONVERSATION_ID_HEADER] = effectiveSessionId;
+			}
+
+			if (effectiveRagNamespace) {
+				headers[HEADERS.X_RAG_NAMESPACE_HEADER] = effectiveRagNamespace;
+			}
+
+			if (effectiveCourseId) {
+				headers[HEADERS.X_COURSE_ID_HEADER] = effectiveCourseId;
 			}
 
 			const response = await fetch(API_CHAT.COMPLETIONS, {

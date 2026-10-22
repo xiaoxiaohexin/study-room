@@ -18,6 +18,7 @@ from app.api.routes.llama_compat import router as llama_compat_router
 from app.api.routes.memory import router as memory_router
 from app.api.routes.rag import router as rag_router
 from app.api.routes.session import router as session_router
+from app.api.routes.web import router as web_router
 from app.core.config import Settings, get_settings
 from app.core.lifespan import lifespan
 from app.observability.logging import setup_logging
@@ -45,6 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(memory_router)
     app.include_router(session_router)
     app.include_router(learn_router)
+    app.include_router(web_router)
 
     return app
 

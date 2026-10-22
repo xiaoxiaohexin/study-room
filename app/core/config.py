@@ -58,6 +58,8 @@ class Settings(BaseSettings):
     chunk_size_tokens: int = 500
     chunk_overlap_tokens: int = 80
     rag_top_k: int = 5
+    # Minimum character-trigram containment for "quote -> textbook page" attribution.
+    rag_attribute_min_overlap: float = 0.45
 
     # ---------- Memory ----------
     memory_top_k: int = 5
@@ -70,10 +72,41 @@ class Settings(BaseSettings):
     forget_capacity: int = 1000
     lifecycle_interval_seconds: int = 600
 
+    # ---------- Web / 临时知识库（Staging） ----------
+    web_enabled: bool = False
+    web_fetch_timeout: float = 15.0
+    web_max_bytes: int = 2_000_000
+    # 为空表示允许所有公网域名（内网/回环/元数据地址始终拒绝，除非允许回环用于测试）
+    web_allowed_domains: list[str] = []
+    web_allow_loopback: bool = False
+    web_search_provider: Literal["none", "searxng", "tavily"] = "none"
+    web_search_base_url: str = ""
+    web_search_api_key: SecretStr | None = None
+    web_search_timeout: float = 15.0
+    # 主搜索服务不可用时的兜底：bing（内置 RSS 搜索，无需额外安装）/ none
+    web_search_fallback_provider: Literal["none", "bing"] = "bing"
+    # 可选 MCP 搜索服务（Streamable HTTP JSON-RPC），配置后优先于内置搜索 Provider。
+    # 注意：这里只配置“MCP 搜索服务地址”，项目不内置 MCP 服务端。
+    mcp_web_server_url: str = ""
+    mcp_web_search_tool: str = "search"
+    mcp_web_timeout: float = 20.0
+    # 本地 RAG 不足时是否联网补充：off（默认）/ auto（后端自动）
+    web_fallback_mode: Literal["off", "auto"] = "off"
+    web_fallback_max_sources: int = 2
+    web_fallback_min_similarity: float = 0.55
+    web_fallback_min_hits: int = 2
+    # 临时知识库
+    staging_ttl_days: int = 7
+    staging_max_documents_per_session: int = 30
+    staging_max_text_chars: int = 40_000
+
     # ---------- Server ----------
     cors_origins: list[str] = ["*"]
     rate_limit_per_minute: int = 60
     log_level: str = "INFO"
+    # 可选 API Token：为空表示不鉴权（默认本机单用户用法）；配置后除 /health 外
+    # 所有请求需携带 `Authorization: Bearer <token>`。
+    api_token: SecretStr | None = None
 
 
 @lru_cache

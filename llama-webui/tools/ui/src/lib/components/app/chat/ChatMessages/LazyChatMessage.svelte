@@ -1,5 +1,6 @@
 <script lang="ts">
 	import ChatMessage from './ChatMessage/ChatMessage.svelte';
+	import { provenanceNavigation } from '$lib/services/provenance-navigation.service';
 	import { chatStore } from '$lib/stores';
 	import type { ChatMessageActions } from '$lib/types';
 
@@ -12,6 +13,8 @@
 		nextAssistantMessage?: DatabaseMessage | null;
 		siblingInfo?: ChatMessageSiblingInfo | null;
 		toolMessages?: DatabaseMessage[];
+		/** Real conversation turn number (1-based); sibling index is separate. */
+		turnIndex?: number;
 	}
 
 	let {
@@ -22,7 +25,8 @@
 		message,
 		nextAssistantMessage = null,
 		siblingInfo = null,
-		toolMessages = []
+		toolMessages = [],
+		turnIndex
 	}: Props = $props();
 
 	// A mounted message row is a whole component tree (contexts, effects,
@@ -54,10 +58,13 @@
 		return () => observer.disconnect();
 	});
 
-	// Flows that target a row by id (pending edit) expect the message
-	// component and its effects to exist; mount the target row first
+	// Flows that target a row by id (pending edit or provenance navigation)
+	// expect the message component and its effects to exist; mount the target row first
 	$effect(() => {
-		if (chatStore.pendingEditMessageId === message.id) {
+		if (
+			chatStore.pendingEditMessageId === message.id ||
+			provenanceNavigation.highlightedMessageId === message.id
+		) {
 			mounted = true;
 		}
 	});
@@ -67,6 +74,10 @@
 	bind:this={wrapperEl}
 	class:chat-message--synthetic={Boolean(message.isSynthetic)}
 	class="chat-message"
+	data-message-id={message.id}
+	data-message-role={message.role}
+	data-turn-index={turnIndex ?? siblingInfo?.currentIndex ?? 1}
+	data-sibling-index={siblingInfo?.currentIndex ?? 0}
 >
 	{#if mounted}
 		<ChatMessage

@@ -2,7 +2,9 @@
 	import ChatScreenActionScrollDown from './ChatScreenActionScrollDown.svelte';
 	import ChatScreenDialogsAndAlerts from './ChatScreenDialogsAndAlerts.svelte';
 	import ChatScreenGreeting from './ChatScreenGreeting.svelte';
-	import InfiniteCanvasWorkspace, { type CanvasViewMode } from './InfiniteCanvasWorkspace.svelte';
+	import InfiniteCanvasWorkspace from './InfiniteCanvasWorkspace.svelte';
+	import TextbookPreviewModal from './TextbookPreviewModal.svelte';
+	import type { CanvasViewMode } from '$lib/types/canvas';
 	import { browser } from '$app/environment';
 	import { page } from '$app/state';
 	import {
@@ -27,6 +29,7 @@
 		serverStore,
 		settingsStore
 	} from '$lib/stores';
+	import { provenanceNavigation } from '$lib/services/provenance-navigation.service';
 	import { parseFilesToMessageExtras } from '$lib/utils/browser-only';
 	import { onDestroy, onMount, tick } from 'svelte';
 
@@ -34,6 +37,30 @@
 
 	let canvasViewMode = $state<CanvasViewMode>('canvas');
 	let chatScreenFormRef: ChatScreenForm | undefined = $state(undefined);
+
+	onMount(() => {
+		const handleProvenanceNavigateToChat = async () => {
+			if (canvasViewMode === 'canvas') {
+				canvasViewMode = 'split';
+				await tick();
+			}
+		};
+
+		const handleProvenanceFocusCanvasNode = async () => {
+			if (canvasViewMode === 'list') {
+				canvasViewMode = 'split';
+				await tick();
+			}
+		};
+
+		document.addEventListener('provenance-navigate-to-chat', handleProvenanceNavigateToChat);
+		document.addEventListener('provenance-focus-canvas-node', handleProvenanceFocusCanvasNode);
+
+		return () => {
+			document.removeEventListener('provenance-navigate-to-chat', handleProvenanceNavigateToChat);
+			document.removeEventListener('provenance-focus-canvas-node', handleProvenanceFocusCanvasNode);
+		};
+	});
 
 	let disableAutoScroll = $derived(
 		Boolean(settingsStore.config.disableAutoScroll) || deviceStore.isMobile
@@ -439,3 +466,5 @@
 	{showDeleteDialog}
 	{showEmptyFileDialog}
 />
+
+<TextbookPreviewModal />

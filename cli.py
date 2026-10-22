@@ -152,7 +152,7 @@ async def run_local_cli(user_id: str):
                     name = parts[0]
                     summary = parts[1] if len(parts) > 1 else ""
                     kp = await container.learning_store.upsert_knowledge_point(
-                        course_id="default", name=name, summary=summary
+                        course_id="default", name=name, summary=summary, user_id=user_id
                     )
                     print(f"{ts()} {GREEN}✅ 已保存知识点: [{kp['id']}] {kp['name']}{RESET}\n")
                 continue
@@ -171,7 +171,7 @@ async def run_local_cli(user_id: str):
                     topic = arg
                 print(f"{ts()} {BLUE}正在围绕「{topic}」生成测验题 ({q_type})...{RESET}")
                 quiz_tool = container.tool_registry.get("quiz_tool")
-                ctx = ToolContext(user_id=user_id, session_id=session.session_id)
+                ctx = ToolContext(user_id=user_id, session_id=session.session_id, rag_namespace=session.rag_namespace or "default", course_id=session.course_id)
                 res = await quiz_tool.run({"action": "generate", "topic": topic, "question_type": q_type}, ctx)
                 if not res.ok:
                     print(f"{RED}出题失败: {res.error}{RESET}")
@@ -186,7 +186,7 @@ async def run_local_cli(user_id: str):
                     print(f"{RED}用法: /answer <你的答案>{RESET}")
                     continue
                 grade_tool = container.tool_registry.get("grade_tool")
-                ctx = ToolContext(user_id=user_id, session_id=session.session_id)
+                ctx = ToolContext(user_id=user_id, session_id=session.session_id, rag_namespace=session.rag_namespace or "default", course_id=session.course_id)
                 res = await grade_tool.run({"user_answer": ans}, ctx)
                 if not res.ok:
                     print(f"{RED}判卷失败: {res.error}{RESET}")
@@ -196,14 +196,14 @@ async def run_local_cli(user_id: str):
 
             if raw_input == "/review":
                 review_tool = container.tool_registry.get("review_tool")
-                ctx = ToolContext(user_id=user_id, session_id=session.session_id)
+                ctx = ToolContext(user_id=user_id, session_id=session.session_id, rag_namespace=session.rag_namespace or "default", course_id=session.course_id)
                 res = await review_tool.run({"action": "due"}, ctx)
                 print(f"\n{CYAN}{res.output}{RESET}\n")
                 continue
 
             if raw_input == "/progress":
                 progress_tool = container.tool_registry.get("progress_tool")
-                ctx = ToolContext(user_id=user_id, session_id=session.session_id)
+                ctx = ToolContext(user_id=user_id, session_id=session.session_id, rag_namespace=session.rag_namespace or "default", course_id=session.course_id)
                 res = await progress_tool.run({"action": "report"}, ctx)
                 print(f"\n{CYAN}{res.output}{RESET}\n")
                 continue
@@ -211,7 +211,7 @@ async def run_local_cli(user_id: str):
             if raw_input.startswith("/plan"):
                 goal = raw_input[len("/plan") :].strip()
                 progress_tool = container.tool_registry.get("progress_tool")
-                ctx = ToolContext(user_id=user_id, session_id=session.session_id)
+                ctx = ToolContext(user_id=user_id, session_id=session.session_id, rag_namespace=session.rag_namespace or "default", course_id=session.course_id)
                 if not goal:
                     res = await progress_tool.run({"action": "list_plans"}, ctx)
                     print(f"\n{CYAN}{res.output}{RESET}\n")
@@ -231,7 +231,9 @@ async def run_local_cli(user_id: str):
                     print(f"{RED}文件不存在: {fpath_str}{RESET}")
                     continue
                 print(f"{ts()} {BLUE}正在导入文档: {fpath_str} ...{RESET}")
-                doc_id, chunks = await container.ingestion_pipeline.ingest_file(fpath, namespace="default")
+                doc_id, chunks = await container.ingestion_pipeline.ingest_file(
+                    fpath, namespace=session.rag_namespace or "default"
+                )
                 print(f"{ts()} {GREEN}文档导入成功！DocID: {doc_id}, 切块数: {chunks}{RESET}")
                 continue
 
