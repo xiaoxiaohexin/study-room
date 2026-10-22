@@ -51,6 +51,7 @@
 		type BackendRelation
 	} from '$lib/services/canvas-sync';
 	import { buildSiblingInfoMap } from '$lib/utils';
+	import { sanitizeUtf8Text } from '$lib/utils/utf8-text';
 	import type {
 		CanvasEdge,
 		CanvasViewMode,
@@ -3411,8 +3412,15 @@
 
 			<!-- 2. Automatic Conversation Turn Nodes (Top Image Carousel Dock + User Prompt + Linked Knowledge/Memory + Assistant Response) -->
 			{#each chatTurnNodes as turn (turn.id)}
-				{@const reasoningText =
-					turn.assistantMessage?.reasoningContent || turn.assistantMessage?.thinking || ''}
+				{@const reasoningText = sanitizeUtf8Text(
+					turn.assistantMessage?.reasoningContent || turn.assistantMessage?.thinking || ''
+				)}
+				{@const isStreamingTurn =
+					turn === chatTurnNodes[chatTurnNodes.length - 1] &&
+					(chatStore.isStreaming() || chatStore.isLoading)}
+				{@const assistantText =
+					turn.assistantMessage.content ||
+					(isStreamingTurn ? '正在生成回复…' : '（本轮生成已取消）')}
 				{@const isReasonOpen = expandedReasoning[turn.id] ?? false}
 				{@const assoc = turnAssociations[turn.id]}
 				{@const turnImages = getTurnImages(turn)}
@@ -4031,7 +4039,7 @@
 								<div class="prose prose-sm dark:prose-invert max-w-none text-xs leading-relaxed">
 									<MarkdownContent
 										attachments={turn.assistantMessage.extra}
-										content={turn.assistantMessage.content || '正在生成回复…'}
+										content={assistantText}
 									/>
 								</div>
 							{:else if chatStore.isLoading}
