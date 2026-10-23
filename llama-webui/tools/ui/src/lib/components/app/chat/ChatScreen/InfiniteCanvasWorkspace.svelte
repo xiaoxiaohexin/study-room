@@ -2273,12 +2273,12 @@
 		try {
 			const res = await fetch(`${base}/tools`, {
 				body: JSON.stringify({
-					arguments: {
+					params: {
 						action: 'create',
 						content: node.content,
 						title: node.title.replace(/^📝\s*/, '') || '画布便签'
 					},
-					name: 'note_tool'
+					tool: 'note_tool'
 				}),
 				headers: { 'Content-Type': 'application/json' },
 				method: 'POST'
@@ -2304,8 +2304,8 @@
 		try {
 			const res = await fetch(`${base}/tools`, {
 				body: JSON.stringify({
-					arguments: { limit: 1 },
-					name: 'review_tool'
+					params: { action: 'due' },
+					tool: 'review_tool'
 				}),
 				headers: { 'Content-Type': 'application/json' },
 				method: 'POST'
@@ -2314,9 +2314,9 @@
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
 			const data = await res.json();
-			const text: string = data.content ?? '';
+			const text: string = data.plain_text ?? '';
 
-			if (text && !text.includes('暂无待复习')) {
+			if (text && !text.includes('暂无到期')) {
 				customNodes[idx].content = text;
 				customNodes[idx].flipped = false;
 				toast.success('已从后端拉取待复习闪卡');
@@ -2354,14 +2354,15 @@
 
 		if (node.cardId) {
 			try {
-				await fetch(`${base}/tools`, {
+				const res = await fetch(`${base}/tools`, {
 					body: JSON.stringify({
-						arguments: { card_id: node.cardId, quality },
-						name: 'grade_tool'
+						params: { action: 'grade', kp_id: node.cardId, quality },
+						tool: 'review_tool'
 					}),
 					headers: { 'Content-Type': 'application/json' },
 					method: 'POST'
 				});
+				if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			} catch {
 				// Ignore background sync error
 			}
