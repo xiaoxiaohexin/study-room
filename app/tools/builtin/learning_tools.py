@@ -332,12 +332,32 @@ class GradeTool(Tool):
                 is_correct = bool(g_data.get("is_correct", score >= 0.6))
                 error_type = str(g_data.get("error_type") or ("none" if is_correct else "concept"))
                 feedback = str(g_data.get("feedback") or "")
-            except Exception:  # noqa: BLE001
-                # 兜底：关键词重合度估算
-                is_correct = q["answer"].lower() in user_answer.lower() or len(user_answer) >= 10
-                score = 0.8 if is_correct else 0.3
-                error_type = "none" if is_correct else "incomplete"
-                feedback = f"参考答案：{q['answer']}。{q.get('explanation', '')}"
+            except Exception as e:  # noqa: BLE001
+                # 兜底：LLM 结构化判分失败时不得臆断正确性。任何"字数够长即判对"的
+                # 推断都会把错误答案写进 SM-2 并拉高掌握度（审计 P0）。
+                # 这里只返回待复核状态，不记录作答、不更新掌握度与复习排期。
+                log.warning(
+                    "subjective_grade_ungraded",
+                    question_id=q["id"],
+                    user_id=context.user_id,
+                    error=str(e),
+                )
+                return ToolResult(
+                    ok=True,
+                    output=(
+                        "【判分结果】⚠️ 待复核 (ungraded) | 自动判分服务不可用，本题未计分。\n"
+                        f"- 题目ID: {q['id']} | 参考要点: {q['answer']}\n"
+                        f"- 你的作答: {user_answer}\n"
+                        "- 本次作答未写入错题本，也未更新知识点掌握度与 SM-2 复习排期。\n"
+                        f"- 解析: {q.get('explanation', '') or '（无）'}"
+                    ),
+                    metadata={
+                        "status": "ungraded",
+                        "question_id": q["id"],
+                        "user_id": context.user_id,
+                        "score": None,
+                    },
+                )
 
         rec = await self.store.record_attempt_and_update_mastery(
             user_id=context.user_id,
