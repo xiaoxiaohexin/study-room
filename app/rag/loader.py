@@ -25,8 +25,10 @@ _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 _TEXT_SUFFIXES = {".txt", ".md", ".json", ".csv", ".py", ".sh", ".yaml", ".yml", ".sql"}
 _PAGE_MARKER_RE = re.compile(r"<!--\s*PAGE:\s*\d+\s*-->", re.IGNORECASE)
 
-# 文本层页数占比低于该阈值时判定为扫描件，交给多模态模型逐页 OCR。
-_OCR_TEXT_COVERAGE_THRESHOLD = 0.2
+# 逐页判定：字符数低于该阈值的页面视为“无文本层/扫描页”，按预算交给多模态模型 OCR。
+_MIN_PAGE_TEXT_CHARS = 10
+# 单个文档每次入库最多 OCR 的页数预算，避免混合扫描件把整本书都送进视觉模型。
+_OCR_MAX_PAGES_PER_DOC = 40
 _OCR_CONCURRENCY = 4
 _OCR_RENDER_SCALE = 2.0
 _OCR_MAX_TOKENS = 4000
@@ -123,21 +125,33 @@ class DocumentLoader:
             log.warning("pdf_has_zero_pages", path=str(file_path))
             return ""
 
-        missing = [i for i, t in enumerate(page_texts, start=1) if not t.strip()]
+        # 逐页检测：只要个别页面没有文本层（教材里穿插的扫描插图页/习题页），
+        # 就单独 OCR 这些页，而不是等整本书都缺文本才触发。
+        missing = [
+            i for i, t in enumerate(page_texts, start=1) if len(t.strip()) < _MIN_PAGE_TEXT_CHARS
+        ]
         text_pages = total_pages - len(missing)
 
-        if missing and text_pages / total_pages < _OCR_TEXT_COVERAGE_THRESHOLD:
+        if missing:
+            ocr_pages = missing[:_OCR_MAX_PAGES_PER_DOC]
+            if len(missing) > len(ocr_pages):
+                log.warning(
+                    "pdf_ocr_budget_truncated",
+                    path=str(file_path),
+                    pages_needing_ocr=len(missing),
+                    pages_ocr_this_run=len(ocr_pages),
+                )
             log.warning(
-                "pdf_scanned_pages_detected",
+                "pdf_pages_without_text_detected",
                 path=str(file_path),
                 total_pages=total_pages,
                 text_pages=text_pages,
-                scanned_pages=len(missing),
+                pages_needing_ocr=len(missing),
             )
-            ocr_text = await self._ocr_pdf_pages(file_path, missing)
+            ocr_text = await self._ocr_pdf_pages(file_path, ocr_pages)
             for page_no, text in ocr_text.items():
                 page_texts[page_no - 1] = text
-            text_pages = sum(1 for t in page_texts if t.strip())
+            text_pages = sum(1 for t in page_texts if len(t.strip()) >= _MIN_PAGE_TEXT_CHARS)
             if text_pages == 0:
                 log.warning("pdf_ocr_produced_no_text", path=str(file_path))
                 return await asyncio.to_thread(self._pdf_fallback, file_path)
