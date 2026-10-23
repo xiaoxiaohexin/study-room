@@ -133,7 +133,6 @@ class QuizTool(Tool):
                 "description": "题型：choice（单选）、fill（填空）、short_answer（简答），默认 choice",
             },
             "difficulty": {"type": "number", "description": "难度 0.1~1.0（默认自动按掌握度匹配）"},
-            "namespace": {"type": "string", "description": "知识库命名空间（默认 default）"},
         },
         "required": ["action"],
     }
@@ -148,9 +147,9 @@ class QuizTool(Tool):
         topic = (arguments.get("topic") or "").strip()
         q_type = arguments.get("question_type") or "choice"
         # The session scope is authoritative for both retrieval and course binding.
-        namespace = (
-            arguments.get("namespace") or context.rag_namespace or "default"
-        ).strip() or "default"
+        # The model cannot pick a knowledge base (it often mistakes a course id for
+        # a namespace, which silently empties retrieval and crosses scopes).
+        namespace = (context.rag_namespace or "default").strip() or "default"
         effective_course = context.course_id or namespace
 
         if action == "next" and not topic:
@@ -240,6 +239,7 @@ class QuizTool(Tool):
         saved = await self.store.add_question(
             kp_id=kp["id"],
             course_id=namespace,
+            user_id=context.user_id,
             q_type=q_type,
             stem=stem,
             options=options,
@@ -290,7 +290,14 @@ class GradeTool(Tool):
         if not user_answer:
             return ToolResult(ok=False, error="user_answer 不能为空。")
 
-        q = await self.store.get_question(question_id) if question_id else None
+        q = (
+            await self.store.get_question(question_id, user_id=context.user_id)
+            if question_id
+            else None
+        )
+        if question_id and not q:
+            # 指定了 question_id 却取不到：题目不存在或不属于当前用户，绝不回退到他题。
+            return ToolResult(ok=False, error=f"题目 [{question_id}] 不存在或不属于当前用户。")
         if not q:
             q = await self.store.get_latest_unanswered_question(context.user_id)
         if not q:

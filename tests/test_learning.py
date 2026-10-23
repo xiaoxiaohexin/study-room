@@ -110,6 +110,7 @@ async def test_learning_router_and_store_closed_loop(tmp_path: Path):
     q = await store.add_question(
         kp_id=kp["id"],
         course_id="cs101",
+        user_id="u1",
         q_type="choice",
         stem="反向传播算法的核心数学基础是什么？",
         options=["A. 链式法则", "B. 泰勒展开", "C. 傅里叶变换", "D. 拉格朗日乘子"],
