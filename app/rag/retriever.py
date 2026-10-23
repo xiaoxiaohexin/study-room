@@ -289,9 +289,6 @@ class RagRetriever:
         log.info("staging_search_completed", returned_count=len(doc_chunks))
         return doc_chunks
 
-        log.info("rag_search_completed", namespace=namespace, returned_count=len(doc_chunks))
-        return doc_chunks
-
     @staticmethod
     def format_citation(chunk: DocChunk, include_score: bool = False) -> str:
         """格式化单个文档切片的引用标头。"""
