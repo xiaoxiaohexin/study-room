@@ -407,6 +407,7 @@ class TestMasteryRetention:
             q_type="choice",
             stem="Attention 机制的缩放因子是？",
             answer="sqrt(d_k)",
+            user_id=user_id,
         )
         qid = q["id"]
 

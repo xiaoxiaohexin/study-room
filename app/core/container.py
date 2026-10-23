@@ -28,6 +28,7 @@ from app.rag.chunker import MarkdownChunker
 from app.rag.loader import DocumentLoader
 from app.rag.pipeline import IngestionPipeline
 from app.rag.retriever import RagRetriever
+from app.schemas.messages import set_allowed_image_roots
 from app.session.state_manager import SessionStateManager
 from app.storage.cache import Cache, InMemoryTTLCache, RedisCache
 from app.storage.graph import GraphStore, Neo4jGraphStore, NullGraphStore
@@ -291,6 +292,10 @@ class AppContainer:
             else "disabled"
         )
 
+        # 客户端传入的本地图片路径只允许读取受控上传目录内的文件（审计 P1-4）。
+        data_dir = Path(s.data_dir)
+        set_allowed_image_roots([data_dir / sub for sub in s.image_allowed_subdirs])
+
         # 9. 初始化上下文与查询扩充
         self.context_builder = ContextBuilder(
             max_tokens=s.context_max_tokens,
@@ -305,7 +310,12 @@ class AppContainer:
         )
         notes_dir = Path(s.data_dir) / "notes"
         self.tool_registry.register(NoteTool(notes_root=notes_dir, sqlite=self.sqlite))
-        self.tool_registry.register(TerminalTool(workspace_root=s.data_dir))
+        # 终端工具默认不注册：避免通过 /tools、/mcp 触发任意命令执行（审计 P0-1）。
+        if s.enable_terminal_tool:
+            self.tool_registry.register(TerminalTool(workspace_root=s.data_dir))
+            self.status["terminal_tool"] = "enabled:read_only_whitelist"
+        else:
+            self.status["terminal_tool"] = "disabled"
         self.tool_registry.register(MemoryTool(memory_manager=self.memory_manager))
         self.tool_registry.register(RagTool(retriever=self.rag_retriever))
         self.tool_registry.register(KnowledgeTool(store=self.learning_store))
@@ -346,6 +356,7 @@ class AppContainer:
             default_max_steps=s.max_steps,
             learning_store=self.learning_store,
             intent_router=self.intent_router,
+            hyde_skip_score=s.hyde_skip_score,
         )
         log.info("container_initialization_completed", status=self.status)
 

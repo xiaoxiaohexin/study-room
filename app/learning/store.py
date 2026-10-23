@@ -811,18 +811,33 @@ class LearningStore:
         source_chunk_id: str = "",
         difficulty: float = 0.5,
         course_id: str = "default",
+        user_id: str = "default_user",
     ) -> dict[str, Any]:
         qid = f"q_{uuid.uuid4().hex[:10]}"
         now = time.time()
         opts_json = json.dumps(options or [], ensure_ascii=False)
         await self.sqlite.conn.execute(
-            "INSERT INTO questions (id, kp_id, course_id, type, stem, options_json, answer, explanation, source_chunk_id, difficulty, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (qid, kp_id, course_id, q_type, stem, opts_json, answer, explanation, source_chunk_id, difficulty, now),
+            "INSERT INTO questions (id, user_id, kp_id, course_id, type, stem, options_json, answer, explanation, source_chunk_id, difficulty, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                qid,
+                user_id,
+                kp_id,
+                course_id,
+                q_type,
+                stem,
+                opts_json,
+                answer,
+                explanation,
+                source_chunk_id,
+                difficulty,
+                now,
+            ),
         )
         await self.sqlite.conn.commit()
         return {
             "id": qid,
+            "user_id": user_id,
             "kp_id": kp_id,
             "course_id": course_id,
             "type": q_type,
@@ -834,8 +849,14 @@ class LearningStore:
             "difficulty": difficulty,
         }
 
-    async def get_question(self, question_id: str) -> dict[str, Any] | None:
-        cur = await self.sqlite.conn.execute("SELECT * FROM questions WHERE id = ?", (question_id,))
+    async def get_question(self, question_id: str, *, user_id: str | None = None) -> dict[str, Any] | None:
+        """Fetch a question. When ``user_id`` is given the question must belong to that user."""
+        if user_id is None:
+            cur = await self.sqlite.conn.execute("SELECT * FROM questions WHERE id = ?", (question_id,))
+        else:
+            cur = await self.sqlite.conn.execute(
+                "SELECT * FROM questions WHERE id = ? AND user_id = ?", (question_id, user_id)
+            )
         row = await cur.fetchone()
         if not row:
             return None
@@ -844,16 +865,17 @@ class LearningStore:
         return d
 
     async def get_latest_unanswered_question(self, user_id: str) -> dict[str, Any] | None:
-        """获取最近生成但该用户尚未作答的一道题（用于会话内直接作答自动关联）。"""
+        """获取该用户最近生成、且尚未作答的一道题（用于会话内直接作答自动关联）。"""
         cur = await self.sqlite.conn.execute(
             """
             SELECT q.* FROM questions q
-            WHERE NOT EXISTS (
+            WHERE q.user_id = ?
+              AND NOT EXISTS (
                 SELECT 1 FROM attempts a WHERE a.question_id = q.id AND a.user_id = ?
             )
             ORDER BY q.created_at DESC LIMIT 1
             """,
-            (user_id,),
+            (user_id, user_id),
         )
         row = await cur.fetchone()
         if not row:
@@ -875,9 +897,12 @@ class LearningStore:
         hints_used: int = 0,
         elapsed_sec: float = 0.0,
     ) -> dict[str, Any]:
-        q = await self.get_question(question_id)
-        kp_id = q["kp_id"] if q else "kp_general"
-        difficulty = float(q["difficulty"]) if q else 0.5
+        q = await self.get_question(question_id, user_id=user_id)
+        if not q:
+            # 判分链路强制校验题目归属：绝不允许用他人生成的题目污染掌握度/错题本。
+            raise ValueError(f"Question '{question_id}' does not exist for user '{user_id}'.")
+        kp_id = q["kp_id"]
+        difficulty = float(q["difficulty"])
         now = time.time()
 
         attempt_id = f"att_{uuid.uuid4().hex[:10]}"

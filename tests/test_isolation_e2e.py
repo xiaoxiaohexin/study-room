@@ -368,6 +368,7 @@ class TestTier1SemanticMemoryAndProfile:
             q_type="choice",
             stem="导数的基本含义是？",
             answer="瞬时变化率",
+            user_id="student_1",
         )
 
         # Student reviews in session 1
@@ -407,6 +408,7 @@ class TestTier1SemanticMemoryAndProfile:
             q_type="choice",
             stem="直角边为3和4，斜边是？",
             answer="5",
+            user_id="student_1",
         )
 
         # Session 1 records a mistake
@@ -439,6 +441,7 @@ class TestTier1SemanticMemoryAndProfile:
             q_type="choice",
             stem="量子叠加态的数学表示？",
             answer="线性叠加",
+            user_id="user_a",
         )
 
         # User A has high mastery
@@ -962,6 +965,7 @@ class TestTier3CrossFeaturePairwiseCombinations:
             q_type="choice",
             stem="i x j 等于？",
             answer="k",
+            user_id="alice",
         )
 
         wm = WorkingMemory(capacity=10)
@@ -1177,6 +1181,7 @@ class TestTier4RealWorldWorkloads:
             q_type="choice",
             stem="快排平均时间复杂度？",
             answer="O(n log n)",
+            user_id="u_sm2",
         )
 
         # Day 1: Session 1 (score 1.0, quality 5)

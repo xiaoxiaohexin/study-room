@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     # ---------- Query Expansion ----------
     mqe_n: int = 3
     hyde_enabled: bool = True
+    # 初筛向量命中分数达到该阈值时跳过 HyDE 的 LLM 调用。
+    hyde_skip_score: float = 0.75
 
     # ---------- RAG ----------
     chunk_size_tokens: int = 500
@@ -101,12 +103,19 @@ class Settings(BaseSettings):
     staging_max_text_chars: int = 40_000
 
     # ---------- Server ----------
-    cors_origins: list[str] = ["*"]
+    # 默认仅允许本地 llama.cpp WebUI 开发源，不再使用通配符 "*"。
+    cors_origins: list[str] = ["http://127.0.0.1:5173", "http://localhost:5173"]
     rate_limit_per_minute: int = 60
     log_level: str = "INFO"
     # 可选 API Token：为空表示不鉴权（默认本机单用户用法）；配置后除 /health 外
     # 所有请求需携带 `Authorization: Bearer <token>`。
     api_token: SecretStr | None = None
+
+    # ---------- Tools ----------
+    # 终端工具默认不注册。只有显式开启后才会挂载（即使开启也只允许只读白名单命令）。
+    enable_terminal_tool: bool = False
+    # 客户端本地图片路径只允许落在该目录内（相对 data_dir）。
+    image_allowed_subdirs: list[str] = ["uploads"]
 
 
 @lru_cache

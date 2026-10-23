@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 from app.agent.prompts import AGENT_SYSTEM_PROMPT
 from app.agent.reflection import Reflector
 from app.context.builder import ContextBuilder
+from app.core.tokens import count_tokens
 from app.learning.router import IntentRouter
 from app.learning.store import LearningStore
 from app.llm.base import LLMClient
@@ -46,6 +48,9 @@ class AgentLoop:
         default_max_steps: int = 8,
         learning_store: LearningStore | None = None,
         intent_router: IntentRouter | None = None,
+        hyde_skip_score: float = 0.75,
+        scratchpad_ratio: float = 0.35,
+        max_reflections: int = 2,
     ):
         self.llm = llm
         self.tools = tools
@@ -61,6 +66,33 @@ class AgentLoop:
         self.default_max_steps = default_max_steps
         self.learning_store = learning_store
         self.intent_router = intent_router
+        self.hyde_skip_score = hyde_skip_score
+        self.scratchpad_ratio = scratchpad_ratio
+        self.max_reflections = max_reflections
+
+    def _scratchpad_budget(self) -> int:
+        """ReAct scratchpad 可用 Token 预算，避免多步工具调用撑爆本地模型 n_ctx。"""
+        base = getattr(self.context_builder, "max_tokens", 8000)
+        return max(512, int(base * self.scratchpad_ratio))
+
+    @staticmethod
+    def _trim_scratchpad(scratchpad: list[Message], budget: int) -> None:
+        """压缩最早的 Observation，不破坏 assistant tool_call / tool 的配对关系。"""
+        total = sum(count_tokens(m.content or "") for m in scratchpad)
+        if total <= budget:
+            return
+        for limit in (600, 240, 120):
+            for msg in scratchpad:
+                if total <= budget:
+                    return
+                if msg.role != "tool":
+                    continue
+                content = msg.content or ""
+                if len(content) <= limit:
+                    continue
+                before = count_tokens(content)
+                msg.content = content[:limit] + "\n…[Observation truncated to fit context budget]"
+                total -= before - count_tokens(msg.content)
 
     async def run(
         self,
@@ -101,6 +133,9 @@ class AgentLoop:
             active_tool_names = decision.tool_names
             retrieval_mode = decision.retrieval_mode
             expose_tools = decision.expose_tools
+            # 让 RouteDecision 的步数预算真正生效（此前恒为配置默认值，审计：死配置）。
+            if request.max_steps is None and decision.max_steps:
+                max_steps = decision.max_steps
             yield AgentEvent(
                 type=EventType.STATUS,
                 step=0,
@@ -113,6 +148,17 @@ class AgentLoop:
                     "detail": f"学习模式路由: [{decision.mode}] ({decision.reason}) | 挂载工具: {', '.join(decision.tool_names)}",
                 },
             )
+
+        effective_rag_namespace = (
+            (request.rag_namespace and request.rag_namespace.strip())
+            or (session.rag_namespace and session.rag_namespace.strip())
+            or "default"
+        )
+        effective_course_id = (
+            (request.course_id and request.course_id.strip())
+            or (session.course_id and session.course_id.strip())
+            or None
+        )
 
         # 1. 查询扩展（带图请求或判卷/复习/计划模式跳过文本扩展，减少本地模型排队延迟）
         queries = [request.message]
@@ -129,7 +175,23 @@ class AgentLoop:
                 step=0,
                 data={"stage": "query_expansion", "detail": "正在执行 MQE 查询扩展与 HyDE 语义分析..."},
             )
-            expanded = await self.query_expander.expand(request.message)
+            # 初筛：原始 query 已高分命中时跳过昂贵的 HyDE LLM 调用（审计 P1）。
+            best_first_pass = 0.0
+            try:
+                pre_hits = await self.rag_retriever.search(
+                    [request.message], namespace=effective_rag_namespace, top_k=3
+                )
+                best_first_pass = max((float(d.score) for d in pre_hits), default=0.0)
+            except Exception as e:  # noqa: BLE001 - 初筛失败不影响主流程
+                log.warning("query_expansion_precheck_failed", error=str(e))
+            log.info(
+                "query_expansion_precheck",
+                best_first_pass_score=round(best_first_pass, 4),
+                hyde_skipped=best_first_pass >= self.hyde_skip_score,
+            )
+            expanded = await self.query_expander.expand(
+                request.message, hyde=best_first_pass < self.hyde_skip_score
+            )
             queries = expanded.all_queries
             hyde_doc = expanded.hypothetical_doc
 
@@ -138,16 +200,6 @@ class AgentLoop:
             type=EventType.STATUS,
             step=0,
             data={"stage": "retrieval", "detail": "正在并行检索学情画像、用户记忆与知识库..."},
-        )
-        effective_rag_namespace = (
-            (request.rag_namespace and request.rag_namespace.strip())
-            or (session.rag_namespace and session.rag_namespace.strip())
-            or "default"
-        )
-        effective_course_id = (
-            (request.course_id and request.course_id.strip())
-            or (session.course_id and session.course_id.strip())
-            or None
         )
         if retrieval_mode == "none":
             memories, docs, learner_profile = [], [], ""
@@ -185,6 +237,10 @@ class AgentLoop:
 
         scratchpad_messages: list[Message] = []
         dialogue_steps_log: list[dict[str, Any]] = []
+        tool_error_count = 0
+        call_counts: dict[str, int] = {}
+        reflection_count = 0
+        last_reflection_step = -10**9
         tool_ctx = ToolContext(
             user_id=user_id,
             session_id=session_id,
@@ -266,6 +322,9 @@ class AgentLoop:
                 )
 
                 for tc in parsed.tool_calls:
+                    call_key = f"{tc.name}:{json.dumps(tc.arguments, sort_keys=True, ensure_ascii=False, default=str)}"
+                    call_counts[call_key] = call_counts.get(call_key, 0) + 1
+
                     yield AgentEvent(
                         type=EventType.TOOL_CALL,
                         step=step,
@@ -273,6 +332,8 @@ class AgentLoop:
                     )
 
                     tool_res = await self.tools.execute(tc.name, tc.arguments, tool_ctx)
+                    if not tool_res.ok:
+                        tool_error_count += 1
 
                     yield AgentEvent(
                         type=EventType.OBSERVATION,
@@ -301,9 +362,25 @@ class AgentLoop:
                     )
 
                 step_record["observations"] = [m.content for m in scratchpad_messages if m.role == "tool"]
+                # scratchpad 预算：多步工具调用时压缩早期观察，避免超出本地模型 n_ctx
+                self._trim_scratchpad(scratchpad_messages, self._scratchpad_budget())
 
-            # Reflection 反思评估
-            if request.enable_reflection and self.reflector.should_reflect(step):
+            # Reflection 反思评估：仅在出现异常信号时触发（工具报错 / 检索为空 / 重复调用）
+            repeated_calls = sum(1 for v in call_counts.values() if v > 1)
+            retrieval_empty = retrieval_mode != "none" and not docs and not memories
+            if (
+                request.enable_reflection
+                and reflection_count < self.max_reflections
+                and (step - last_reflection_step) >= self.reflector.interval_steps
+                and self.reflector.should_reflect(
+                    step,
+                    tool_errors=tool_error_count,
+                    retrieval_empty=retrieval_empty,
+                    repeated_calls=repeated_calls,
+                )
+            ):
+                reflection_count += 1
+                last_reflection_step = step
                 scratchpad_text = "\n".join(f"{m.role}: {m.content}" for m in scratchpad_messages[-6:])
                 verdict = await self.reflector.reflect(request.message, scratchpad_text)
                 yield AgentEvent(

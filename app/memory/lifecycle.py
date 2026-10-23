@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 import time
 
 from app.memory.base import BaseMemory, MemoryItem
 from app.observability.logging import get_logger
 
 log = get_logger(__name__)
+
+_WS_RE = re.compile(r"\s+")
 
 
 class MemoryLifecycle:
@@ -30,6 +34,10 @@ class MemoryLifecycle:
         self.forget_importance_thresh = forget_importance_thresh
         self.forget_max_age_days = forget_max_age_days
         self.forget_capacity = forget_capacity
+
+    @staticmethod
+    def _content_hash(content: str) -> str:
+        return hashlib.sha256(_WS_RE.sub(" ", content or "").strip().lower().encode("utf-8")).hexdigest()
 
     async def consolidate(self, user_id: str, session_id: str | None = None) -> dict[str, int]:
         """将高重要度的工作记忆沉淀到情景记忆，将高重要度的情景记忆提炼到语义记忆。"""
@@ -58,19 +66,36 @@ class MemoryLifecycle:
                 session_id=session_id,
             )
 
-        # 2. Episodic -> Semantic
+        # 2. Episodic -> Semantic（幂等：同一情景记忆只沉淀一次）
         e_items = await self.episodic.list_items(user_id, limit=100, session_id=session_id)
         to_semantic = [it for it in e_items if it.importance >= self.consolidate_episodic_thresh]
+        existing = await self.semantic.list_items(user_id, limit=10_000)
+        synced_episodic_ids = {
+            str(it.metadata.get("source_episodic_id"))
+            for it in existing
+            if it.metadata.get("source_episodic_id")
+        }
+        content_hashes = {self._content_hash(it.content) for it in existing}
         for it in to_semantic:
+            content_hash = self._content_hash(it.content)
+            # 已有同源情景记忆，或内容完全相同的语义记忆，直接跳过，避免无限重复累积。
+            if str(it.id) in synced_episodic_ids or content_hash in content_hashes:
+                continue
             new_item = MemoryItem(
                 user_id=it.user_id,
                 session_id=it.session_id,
                 type="semantic",
                 content=it.content,
                 importance=it.importance,
-                metadata={"source_episodic_id": it.id, **it.metadata},
+                metadata={
+                    "source_episodic_id": it.id,
+                    "content_hash": content_hash,
+                    **it.metadata,
+                },
             )
             await self.semantic.add(new_item)
+            synced_episodic_ids.add(str(it.id))
+            content_hashes.add(content_hash)
             e_to_s_count += 1
 
         result = {"working_to_episodic": w_to_e_count, "episodic_to_semantic": e_to_s_count}

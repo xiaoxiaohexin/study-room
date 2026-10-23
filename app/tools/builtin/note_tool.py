@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -15,6 +16,9 @@ from app.storage.sqlite import SQLiteStore
 from app.tools.base import Tool, ToolContext, ToolResult
 
 log = get_logger(__name__)
+
+# user_id / note_id 只允许安全字符，杜绝 "../../outside/secret" 之类的路径穿越。
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class NoteTool(Tool):
@@ -41,14 +45,32 @@ class NoteTool(Tool):
     }
 
     def __init__(self, notes_root: Path, sqlite: SQLiteStore):
-        self.notes_root = Path(notes_root)
+        self.notes_root = Path(notes_root).resolve()
         self.sqlite = sqlite
         self.notes_root.mkdir(parents=True, exist_ok=True)
 
+    @staticmethod
+    def _safe_id(value: str, field: str) -> str:
+        value = (value or "").strip()
+        if not _SAFE_ID_RE.match(value):
+            raise ValueError(f"{field} 仅允许字母、数字、下划线与短横线（1~64 位）。")
+        return value
+
     def _user_dir(self, user_id: str) -> Path:
-        p = self.notes_root / user_id
+        safe_user = self._safe_id(user_id, "user_id")
+        p = self.notes_root / safe_user
+        # 纵深防御：即使字符校验被绕过，也必须落在 notes_root 内。
+        if not p.resolve().is_relative_to(self.notes_root):
+            raise ValueError("user_id 解析后越出笔记根目录。")
         p.mkdir(parents=True, exist_ok=True)
         return p
+
+    def _note_path(self, user_id: str, note_id: str) -> Path:
+        safe_note = self._safe_id(note_id, "note_id")
+        target = (self._user_dir(user_id) / f"{safe_note}.md").resolve()
+        if not target.is_relative_to(self.notes_root):
+            raise ValueError("note_id 解析后越出笔记根目录。")
+        return target
 
     async def run(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         action = arguments.get("action")
@@ -63,7 +85,7 @@ class NoteTool(Tool):
                 note_id = uuid.uuid4().hex[:12]
                 now = time.time()
 
-                file_path = self._user_dir(user_id) / f"{note_id}.md"
+                file_path = self._note_path(user_id, note_id)
                 meta = {"id": note_id, "title": title, "tags": tags, "created_at": now, "updated_at": now}
                 doc_text = f"---\n{yaml.safe_dump(meta, allow_unicode=True)}---\n\n{content}"
                 file_path.write_text(doc_text, encoding="utf-8")
@@ -81,7 +103,7 @@ class NoteTool(Tool):
                 note_id = arguments.get("note_id")
                 if not note_id:
                     return ToolResult(ok=False, error="读取笔记必须提供 note_id。")
-                file_path = self._user_dir(user_id) / f"{note_id}.md"
+                file_path = self._note_path(user_id, note_id)
                 if not file_path.exists():
                     return ToolResult(ok=False, error=f"笔记 {note_id} 不存在。")
                 return ToolResult(ok=True, output=file_path.read_text(encoding="utf-8"))
@@ -90,7 +112,7 @@ class NoteTool(Tool):
                 note_id = arguments.get("note_id")
                 if not note_id:
                     return ToolResult(ok=False, error="更新笔记必须提供 note_id。")
-                file_path = self._user_dir(user_id) / f"{note_id}.md"
+                file_path = self._note_path(user_id, note_id)
                 if not file_path.exists():
                     return ToolResult(ok=False, error=f"笔记 {note_id} 不存在。")
 

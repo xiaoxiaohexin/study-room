@@ -21,7 +21,21 @@ async def _background_memory_maintenance(container: AppContainer, interval_sec: 
         while True:
             await asyncio.sleep(interval_sec)
             log.info("triggering_periodic_memory_maintenance")
-            # 维护任务：定期清理工作记忆与过期情景记忆
+            # 真正的维护：按重要度淘汰过期情景记忆，而不是只打印日志（审计 P1-6）。
+            try:
+                user_ids = await container.sqlite.list_user_ids()
+            except Exception as e:  # noqa: BLE001 - 维护失败不影响服务
+                log.warning("memory_maintenance_list_users_failed", error=str(e))
+                continue
+            for user_id in user_ids:
+                try:
+                    removed = await container.memory_lifecycle.forget(user_id, strategy="importance")
+                    removed += await container.memory_lifecycle.forget(user_id, strategy="capacity")
+                    removed += await container.memory_lifecycle.forget(user_id, strategy="age")
+                    if removed:
+                        log.info("memory_maintenance_pruned", user_id=user_id, removed=removed)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("memory_maintenance_failed", user_id=user_id, error=str(e))
     except asyncio.CancelledError:
         log.info("background_memory_maintenance_worker_stopped")
 

@@ -33,6 +33,12 @@ class VectorStore(Protocol):
     async def search(
         self, collection: str, vector: list[float], top_k: int, filters: dict[str, Any] | None = None
     ) -> list[ScoredPoint]: ...
+    async def list_points(
+        self, collection: str, filters: dict[str, Any] | None = None, limit: int = 1000
+    ) -> list[ScoredPoint]:
+        """Enumerate stored points (payload only) so callers survive restarts."""
+        ...
+
     async def delete(self, collection: str, ids: list[str]) -> None: ...
     async def aclose(self) -> None: ...
 
@@ -70,6 +76,16 @@ class InMemoryVectorStore:
         scores = (m @ q) / denom
         idx = np.argsort(-scores)[:top_k]
         return [ScoredPoint(id=cands[i].id, score=float(scores[i]), payload=cands[i].payload) for i in idx]
+
+    async def list_points(
+        self, collection: str, filters: dict[str, Any] | None = None, limit: int = 1000
+    ) -> list[ScoredPoint]:
+        col = self._data.get(collection, {})
+        cands = [p for p in col.values() if _match(p.payload, filters)]
+        cands.sort(key=lambda p: float(p.payload.get("created_at", 0) or 0), reverse=True)
+        return [
+            ScoredPoint(id=p.id, score=0.0, payload=p.payload) for p in cands[:limit]
+        ]
 
     async def delete(self, collection, ids) -> None:
         col = self._data.get(collection, {})
@@ -156,6 +172,17 @@ class SQLiteVectorStore:
         idx = np.argsort(-scores)[:top_k]
         return [ScoredPoint(id=cands[i].id, score=float(scores[i]), payload=cands[i].payload) for i in idx]
 
+    async def list_points(
+        self, collection: str, filters: dict[str, Any] | None = None, limit: int = 1000
+    ) -> list[ScoredPoint]:
+        async with self._lock:
+            col = await self._ensure_loaded(collection)
+            cands = [p for p in col.values() if _match(p.payload, filters)]
+        cands.sort(key=lambda p: float(p.payload.get("created_at", 0) or 0), reverse=True)
+        return [
+            ScoredPoint(id=p.id, score=0.0, payload=p.payload) for p in cands[:limit]
+        ]
+
     async def delete(self, collection: str, ids: list[str]) -> None:
         if not ids:
             return
@@ -219,6 +246,34 @@ class QdrantVectorStore:
             collection, query=vector, limit=top_k, query_filter=qf, with_payload=True
         )
         return [ScoredPoint(id=str(p.id), score=p.score, payload=p.payload or {}) for p in res.points]
+
+    async def list_points(
+        self, collection: str, filters: dict[str, Any] | None = None, limit: int = 1000
+    ) -> list[ScoredPoint]:
+        from qdrant_client import models
+
+        qf = None
+        if filters:
+            qf = models.Filter(
+                must=[
+                    models.FieldCondition(key=k, match=models.MatchValue(value=v))
+                    for k, v in filters.items()
+                ]
+            )
+        try:
+            if collection not in self._known and not await self.client.collection_exists(collection):
+                return []
+            points, _ = await self.client.scroll(
+                collection,
+                scroll_filter=qf,
+                limit=limit,
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception as e:  # noqa: BLE001 - enumeration is best effort
+            log.warning("qdrant_list_points_failed", collection=collection, error=str(e))
+            return []
+        return [ScoredPoint(id=str(p.id), score=0.0, payload=p.payload or {}) for p in points]
 
     async def delete(self, collection, ids) -> None:
         from qdrant_client import models
