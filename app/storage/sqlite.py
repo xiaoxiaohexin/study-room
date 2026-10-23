@@ -722,6 +722,25 @@ class SQLiteStore:
         await self.conn.execute("DELETE FROM staging_candidates WHERE doc_id = ?", (doc_id,))
         await self.conn.commit()
 
+    async def list_user_ids(self, limit: int = 500) -> list[str]:
+        """Distinct users that own any state (used by the background memory maintenance)."""
+        cur = await self.conn.execute(
+            """
+            SELECT user_id FROM (
+                SELECT user_id FROM sessions
+                UNION
+                SELECT user_id FROM mastery
+                UNION
+                SELECT user_id FROM episodic_memories
+            )
+            WHERE user_id IS NOT NULL AND user_id <> ''
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cur.fetchall()
+        return [r["user_id"] for r in rows]
+
     async def aclose(self) -> None:
         async with self._lock:
             if self._db:

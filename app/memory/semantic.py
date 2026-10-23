@@ -127,14 +127,17 @@ class SemanticMemory(BaseMemory):
         if not ids:
             return
         await self._ensure_store()
-        owned = [
-            i
-            for i in ids
-            if i in self._items and (user_id is None or self._items[i].user_id == user_id)
-        ]
-        if user_id is not None and not owned:
-            return
-        delete_ids = owned if user_id is not None else ids
+        if user_id is not None:
+            # 归属校验必须基于持久化 payload，进程内 _items 在重启后会丢失。
+            points = await self.vector_store.list_points(
+                self.collection_name, filters={"user_id": user_id}, limit=10_000
+            )
+            owned = {p.id for p in points}
+            delete_ids = [i for i in ids if i in owned]
+            if not delete_ids:
+                return
+        else:
+            delete_ids = list(ids)
         await self.vector_store.delete(self.collection_name, delete_ids)
         for i in delete_ids:
             self._items.pop(i, None)
@@ -143,6 +146,24 @@ class SemanticMemory(BaseMemory):
     async def list_items(
         self, user_id: str, limit: int = 50, session_id: str | None = None
     ) -> list[MemoryItem]:
-        # 语义记忆属于全局概念图谱，跨会话完整返回
-        items = [it for it in self._items.values() if it.user_id == user_id]
-        return sorted(items, key=lambda x: x.created_at, reverse=True)[:limit]
+        # 语义记忆属于全局概念图谱，跨会话完整返回；数据以向量库为准，重启后不丢失。
+        await self._ensure_store()
+        points = await self.vector_store.list_points(
+            self.collection_name, filters={"user_id": user_id}, limit=limit
+        )
+        items: list[MemoryItem] = []
+        for pt in points:
+            payload = pt.payload or {}
+            items.append(
+                MemoryItem(
+                    id=pt.id,
+                    user_id=user_id,
+                    type="semantic",
+                    content=str(payload.get("content", "")),
+                    importance=float(payload.get("importance", 0.5)),
+                    created_at=float(payload.get("created_at", 0.0) or 0.0),
+                    metadata=payload.get("metadata") or {},
+                )
+            )
+        items.sort(key=lambda x: x.created_at, reverse=True)
+        return items[:limit]
