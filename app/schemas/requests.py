@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.schemas.messages import validate_image_input
 
 
 class ChatRequest(BaseModel):
     user_id: str = Field(..., min_length=1, max_length=128)
     session_id: str | None = Field(None, description="为空时新建会话")
     message: str = Field(..., min_length=1)
-    images: list[str] | None = Field(None, description="可选：图片本地路径、Data URL 或 HTTP URL 列表")
+    images: list[str] | None = Field(None, description="可选：受控上传目录内的图片路径、Data URL 或 HTTP URL 列表")
     mode: str | None = Field(
         None,
         description="可选：显式指定学习模式 (explain/quiz/grade/review/plan/homework/chat)，为空时自动路由",
@@ -22,6 +24,17 @@ class ChatRequest(BaseModel):
     max_steps: int | None = Field(None, ge=1, le=30)
     enable_query_expansion: bool = True
     enable_reflection: bool = True
+
+    @field_validator("images")
+    @classmethod
+    def _validate_image_paths(cls, value: list[str] | None) -> list[str] | None:
+        """本地图片路径只能是受控上传目录内的文件（审计 P1-4）。"""
+        for item in value or []:
+            try:
+                validate_image_input(item)
+            except (PermissionError, FileNotFoundError, OSError, ValueError) as e:
+                raise ValueError(f"Invalid image reference: {e}") from e
+        return value
 
 
 class RagSearchRequest(BaseModel):

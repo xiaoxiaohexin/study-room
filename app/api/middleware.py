@@ -105,10 +105,19 @@ def setup_middlewares(app: FastAPI, settings: Settings) -> None:
     async def validation_exception_handler(request: Request, exc: RequestValidationError):
         req_id = request_id_var.get()
         log.warning("request_validation_error", errors=exc.errors(), request_id=req_id)
+        # pydantic 会把原始异常对象放进 ctx（不可 JSON 序列化），这里统一转成字符串。
+        safe_errors = []
+        for err in exc.errors():
+            item = dict(err)
+            if isinstance(item.get("ctx"), dict):
+                item["ctx"] = {k: str(v) for k, v in item["ctx"].items()}
+            if isinstance(item.get("input"), (bytes, bytearray)):
+                item["input"] = "<binary>"
+            safe_errors.append(item)
         err = ErrorResponse(
             code=400,
             error="Validation Error",
-            detail=exc.errors(),
+            detail=safe_errors,
             request_id=req_id,
         )
         return JSONResponse(status_code=400, content=err.model_dump())

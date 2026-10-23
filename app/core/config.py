@@ -111,6 +111,8 @@ class Settings(BaseSettings):
     # ---------- Tools ----------
     # 终端工具默认不注册。只有显式开启后才会挂载（即使开启也只允许只读白名单命令）。
     enable_terminal_tool: bool = False
+    # 客户端本地图片路径只允许落在该目录内（相对 data_dir）。
+    image_allowed_subdirs: list[str] = ["uploads"]
 
 
 @lru_cache
