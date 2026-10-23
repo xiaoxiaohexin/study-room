@@ -115,7 +115,9 @@ cd llama-webui/tools/ui
 npm install
 npm run dev
 ```
-打开浏览器访问 `http://localhost:5173`。在设置中确认连接到 `http://127.0.0.1:8000`，即可享受沉浸式学习体验！
+打开浏览器访问 `http://localhost:5173`，即可享受沉浸式学习体验！
+
+> 前端通过 Vite 代理访问后端，默认目标是 `http://127.0.0.1:8000`。若后端端口不同，在 `llama-webui/tools/ui/.env` 中设置 `VITE_PUBLIC_SERVER_ORIGIN='http://127.0.0.1:<端口>'` 后再启动。也可以先 `npm run build`，再由后端直接托管构建产物（单端口部署）。
 
 ---
 

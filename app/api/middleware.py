@@ -137,6 +137,16 @@ def setup_middlewares(app: FastAPI, settings: Settings) -> None:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # The WebUI reads retrieval diagnostics off the chat response, which the
+        # browser only exposes for headers listed here on cross-origin requests.
+        expose_headers=[
+            "X-RAG-Hits",
+            "X-Web-Sources",
+            "X-Learning-Mode",
+            "X-Retrieval-Mode",
+            "X-Request-ID",
+            "X-Response-Time-Ms",
+        ],
     )
 
     # 4. 请求上下文与日志追踪中间件

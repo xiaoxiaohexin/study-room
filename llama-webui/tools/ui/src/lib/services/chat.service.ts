@@ -33,6 +33,7 @@ import {
 	StreamConnectionState
 } from '$lib/enums';
 import { modelsStore } from '$lib/stores/models/index.svelte';
+import { retrievalStatusStore } from '$lib/stores/retrieval-status.svelte';
 import { settingsStore } from '$lib/stores/settings/index.svelte';
 import type { DatabaseMessageExtraMcpPrompt, DatabaseMessageExtraMcpResource } from '$lib/types';
 import type {
@@ -423,6 +424,33 @@ export class ChatService {
 	}
 
 	/**
+	 * Record the retrieval diagnostics the backend attaches to a chat response.
+	 * Only the first (non-followup) round of a turn carries them, so tool
+	 * follow-ups never overwrite the original intent/mode.
+	 */
+	private static captureRetrievalStatus(response: Response, conversationId?: string): void {
+		if (!conversationId) return;
+
+		const mode = response.headers.get('X-Learning-Mode');
+
+		if (!mode || mode === 'followup') return;
+
+		const readCount = (name: string): number => {
+			const value = Number(response.headers.get(name));
+
+			return Number.isFinite(value) && value > 0 ? value : 0;
+		};
+
+		retrievalStatusStore.set({
+			conversationId,
+			ragHits: readCount('X-RAG-Hits'),
+			webSources: readCount('X-Web-Sources'),
+			mode,
+			retrievalMode: response.headers.get('X-Retrieval-Mode') ?? 'none'
+		});
+	}
+
+	/**
 	 * Handles streaming response from the chat completion API.
 	 */
 	static async handleStreamResponse(
@@ -445,6 +473,8 @@ export class ChatService {
 		onConnectionState?: (state: StreamConnectionState) => void,
 		streamModel?: string | null
 	): Promise<void> {
+		ChatService.captureRetrievalStatus(response, conversationId);
+
 		let reader = response.body?.getReader();
 
 		if (!reader) {

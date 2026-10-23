@@ -446,8 +446,8 @@ class ReviewTool(Tool):
                 ok=True,
                 output=(
                     f"【SM-2 复习评分已记录】{rec['name']} ({rec['kp_id']})\n"
-                    f"- 质量分: {rec['quality']} | 掌握度: {rec['prev_mastery']:.2f} -> {rec['new_mastery']:.2f}\n"
-                    f"- 下次复习间隔: {rec['interval_days']} 天后 ({next_dt})"
+                    f"- 质量分: {rec['quality']}/5 | 掌握度: {rec['prev_mastery']:.2f} -> {rec['new_mastery']:.2f}\n"
+                    f"- 下次复习间隔: {rec['interval_days']} 天后 ({next_dt}) | EF: {rec['ef']}"
                 ),
                 metadata=rec,
             )
