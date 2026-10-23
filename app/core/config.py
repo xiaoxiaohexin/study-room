@@ -108,6 +108,10 @@ class Settings(BaseSettings):
     # 所有请求需携带 `Authorization: Bearer <token>`。
     api_token: SecretStr | None = None
 
+    # ---------- Tools ----------
+    # 终端工具默认不注册。只有显式开启后才会挂载（即使开启也只允许只读白名单命令）。
+    enable_terminal_tool: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

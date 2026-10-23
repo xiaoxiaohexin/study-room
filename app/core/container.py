@@ -305,7 +305,12 @@ class AppContainer:
         )
         notes_dir = Path(s.data_dir) / "notes"
         self.tool_registry.register(NoteTool(notes_root=notes_dir, sqlite=self.sqlite))
-        self.tool_registry.register(TerminalTool(workspace_root=s.data_dir))
+        # 终端工具默认不注册：避免通过 /tools、/mcp 触发任意命令执行（审计 P0-1）。
+        if s.enable_terminal_tool:
+            self.tool_registry.register(TerminalTool(workspace_root=s.data_dir))
+            self.status["terminal_tool"] = "enabled:read_only_whitelist"
+        else:
+            self.status["terminal_tool"] = "disabled"
         self.tool_registry.register(MemoryTool(memory_manager=self.memory_manager))
         self.tool_registry.register(RagTool(retriever=self.rag_retriever))
         self.tool_registry.register(KnowledgeTool(store=self.learning_store))
