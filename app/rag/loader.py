@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 import re
+import tempfile
+from pathlib import Path
 
 import pypdf
 from pypdf.errors import PyPdfError
@@ -13,11 +14,27 @@ from app.llm.base import LLMClient
 from app.observability.logging import get_logger
 from app.schemas.messages import Message
 
+try:
+    import pypdfium2 as _pdfium
+except ImportError:  # pragma: no cover - optional rendering backend
+    _pdfium = None
+
 log = get_logger(__name__)
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 _TEXT_SUFFIXES = {".txt", ".md", ".json", ".csv", ".py", ".sh", ".yaml", ".yml", ".sql"}
 _PAGE_MARKER_RE = re.compile(r"<!--\s*PAGE:\s*\d+\s*-->", re.IGNORECASE)
+
+# 文本层页数占比低于该阈值时判定为扫描件，交给多模态模型逐页 OCR。
+_OCR_TEXT_COVERAGE_THRESHOLD = 0.2
+_OCR_CONCURRENCY = 4
+_OCR_RENDER_SCALE = 2.0
+_OCR_MAX_TOKENS = 4000
+_OCR_PAGE_TIMEOUT = 600.0
+_OCR_PROMPT = (
+    "请将这一页教科书完整转写为 Markdown：保留数学公式的 LaTeX、标题层级、正文、"
+    "例题与习题编号。不要输出图片链接或占位符，不要添加任何解释。"
+)
 
 
 class DocumentLoader:
@@ -51,7 +68,7 @@ class DocumentLoader:
 
         # 1. PDF 文档：优先使用 pypdf 进行物理页码保留提取
         if suffix == ".pdf":
-            return await asyncio.to_thread(self._load_pdf, file_path)
+            return await self._load_pdf(file_path)
 
         # 2. 图片文件：通过多模态 LLM 提取视觉与 OCR 文字
         if suffix in _IMAGE_SUFFIXES and self.llm:
@@ -93,78 +110,168 @@ class DocumentLoader:
         # 5. 兜底纯文本读取
         return await asyncio.to_thread(self._load_text, file_path)
 
-    def _load_pdf(self, file_path: Path) -> str:
-        """从 PDF 中逐页提取文字，并嵌入 <!-- PAGE: {page_idx} --> 物理页码标识。"""
+    async def _load_pdf(self, file_path: Path) -> str:
+        """逐页提取文字；无文本层的扫描页交给多模态模型 OCR，并保留物理页码标记。"""
         try:
-            reader = pypdf.PdfReader(str(file_path))
-            if reader.is_encrypted:
-                try:
-                    # 尝试用空密码解密（常见于只设限制打印但可阅读的文档）
-                    reader.decrypt("")
-                except Exception as dec_err:  # noqa: BLE001
-                    log.warning("pdf_decrypt_failed", path=str(file_path), error=str(dec_err))
+            page_texts = await asyncio.to_thread(self._extract_pdf_texts, file_path)
+        except (PyPdfError, Exception) as e:  # noqa: BLE001
+            log.warning("pypdf_load_failed", path=str(file_path), error=str(e))
+            return await asyncio.to_thread(self._pdf_fallback, file_path)
 
-            total_pages = len(reader.pages)
-            if total_pages == 0:
-                log.warning("pdf_has_zero_pages", path=str(file_path))
-                return ""
+        total_pages = len(page_texts)
+        if total_pages == 0:
+            log.warning("pdf_has_zero_pages", path=str(file_path))
+            return ""
 
-            page_blocks: list[str] = []
-            has_extracted_any_text = False
+        missing = [i for i, t in enumerate(page_texts, start=1) if not t.strip()]
+        text_pages = total_pages - len(missing)
 
-            for page_idx, page in enumerate(reader.pages, start=1):
-                try:
-                    page_text = (page.extract_text() or "").strip()
-                except Exception as page_err:  # noqa: BLE001
-                    log.warning("pdf_page_extract_failed", path=str(file_path), page=page_idx, error=str(page_err))
-                    page_text = ""
-
-                if page_text:
-                    has_extracted_any_text = True
-                    page_blocks.append(f"<!-- PAGE: {page_idx} -->\n{page_text}")
-
-            if not has_extracted_any_text:
-                log.warning("pdf_no_text_layer_detected", path=str(file_path), total_pages=total_pages)
-                # 尝试 markitdown 兜底（针对特殊字体编码）
-                if self._has_markitdown:
-                    try:
-                        from markitdown import MarkItDown
-
-                        md = MarkItDown()
-                        res = md.convert(str(file_path))
-                        fallback_text = (res.text_content or "").strip()
-                        if fallback_text:
-                            log.info("markitdown_pdf_fallback_success", path=str(file_path), length=len(fallback_text))
-                            return f"<!-- PAGE: 1 -->\n\n{fallback_text}"
-                    except Exception as fb_err:  # noqa: BLE001
-                        log.warning("markitdown_pdf_fallback_failed", path=str(file_path), error=str(fb_err))
-                return "\n\n".join(f"<!-- PAGE: {i} -->" for i in range(1, total_pages + 1))
-
-            result_md = "\n\n".join(page_blocks)
-            log.info(
-                "pdf_loaded_successfully",
+        if missing and text_pages / total_pages < _OCR_TEXT_COVERAGE_THRESHOLD:
+            log.warning(
+                "pdf_scanned_pages_detected",
                 path=str(file_path),
                 total_pages=total_pages,
-                extracted_pages=len(page_blocks),
-                char_count=len(result_md),
+                text_pages=text_pages,
+                scanned_pages=len(missing),
             )
-            return result_md
+            ocr_text = await self._ocr_pdf_pages(file_path, missing)
+            for page_no, text in ocr_text.items():
+                page_texts[page_no - 1] = text
+            text_pages = sum(1 for t in page_texts if t.strip())
+            if text_pages == 0:
+                log.warning("pdf_ocr_produced_no_text", path=str(file_path))
+                return await asyncio.to_thread(self._pdf_fallback, file_path)
 
-        except (PyPdfError, Exception) as e:
-            log.warning("pypdf_load_failed", path=str(file_path), error=str(e))
-            # 异常发生时，尝试 markitdown 或纯文本兜底
-            if self._has_markitdown:
-                try:
-                    from markitdown import MarkItDown
+        page_blocks = [
+            f"<!-- PAGE: {i} -->\n{text}"
+            for i, text in enumerate(page_texts, start=1)
+            if text.strip()
+        ]
+        if not page_blocks:
+            return await asyncio.to_thread(self._pdf_fallback, file_path)
 
-                    md = MarkItDown()
-                    res = md.convert(str(file_path))
-                    text = (res.text_content or "").strip()
-                    if text:
-                        return f"<!-- PAGE: 1 -->\n\n{text}"
-                except Exception:  # noqa: BLE001
-                    pass
+        result_md = "\n\n".join(page_blocks)
+        log.info(
+            "pdf_loaded_successfully",
+            path=str(file_path),
+            total_pages=total_pages,
+            extracted_pages=len(page_blocks),
+            char_count=len(result_md),
+        )
+        return result_md
+
+    def _extract_pdf_texts(self, file_path: Path) -> list[str]:
+        """返回与物理页一一对应的提取文本列表（无文本层的页为空串）。"""
+        reader = pypdf.PdfReader(str(file_path))
+        if reader.is_encrypted:
+            try:
+                # 尝试用空密码解密（常见于只设限制打印但可阅读的文档）
+                reader.decrypt("")
+            except Exception as dec_err:  # noqa: BLE001
+                log.warning("pdf_decrypt_failed", path=str(file_path), error=str(dec_err))
+
+        texts: list[str] = []
+        for page_idx, page in enumerate(reader.pages, start=1):
+            try:
+                texts.append((page.extract_text() or "").strip())
+            except Exception as page_err:  # noqa: BLE001
+                log.warning(
+                    "pdf_page_extract_failed", path=str(file_path), page=page_idx, error=str(page_err)
+                )
+                texts.append("")
+        return texts
+
+    async def _ocr_pdf_pages(self, file_path: Path, page_numbers: list[int]) -> dict[int, str]:
+        """渲染指定物理页并调用多模态模型转写为 Markdown，返回 {页码: 文本}。"""
+        if self.llm is None or _pdfium is None or not page_numbers:
+            log.warning(
+                "pdf_ocr_unavailable",
+                path=str(file_path),
+                has_llm=self.llm is not None,
+                has_renderer=_pdfium is not None,
+            )
+            return {}
+
+        total = len(page_numbers)
+        log.info(
+            "pdf_ocr_started",
+            path=str(file_path),
+            pages_total=total,
+            concurrency=_OCR_CONCURRENCY,
+        )
+        results: dict[int, str] = {}
+        done = 0
+        semaphore = asyncio.Semaphore(_OCR_CONCURRENCY)
+
+        with tempfile.TemporaryDirectory(prefix="rag_ocr_") as tmp_dir_name:
+            tmp_dir = Path(tmp_dir_name)
+
+            async def _ocr_one(page_no: int) -> tuple[int, str]:
+                async with semaphore:
+                    try:
+                        image = await asyncio.to_thread(
+                            self._render_pdf_page, file_path, page_no, tmp_dir
+                        )
+                    except Exception as render_err:  # noqa: BLE001
+                        log.warning("pdf_page_render_failed", page=page_no, error=str(render_err))
+                        return page_no, ""
+                    try:
+                        resp = await self.llm.chat(
+                            [Message(role="user", content=_OCR_PROMPT, images=[str(image)])],
+                            max_tokens=_OCR_MAX_TOKENS,
+                            timeout=_OCR_PAGE_TIMEOUT,
+                        )
+                        return page_no, (resp.content or "").strip()
+                    except Exception as ocr_err:  # noqa: BLE001
+                        log.warning("pdf_page_ocr_failed", page=page_no, error=str(ocr_err))
+                        return page_no, ""
+                    finally:
+                        image.unlink(missing_ok=True)
+
+            tasks = [
+                asyncio.create_task(_ocr_one(page_no), name=f"ocr_page_{page_no}")
+                for page_no in page_numbers
+            ]
+            for finished in asyncio.as_completed(tasks):
+                page_no, text = await finished
+                results[page_no] = text
+                done += 1
+                if done % 10 == 0 or done == total:
+                    log.info("pdf_ocr_progress", done=done, total=total)
+
+        transcribed = sum(1 for t in results.values() if t)
+        log.info("pdf_ocr_completed", pages_total=total, pages_transcribed=transcribed)
+        return {page_no: text for page_no, text in results.items() if text}
+
+    def _render_pdf_page(self, file_path: Path, page_no: int, out_dir: Path) -> Path:
+        """将单个物理页渲染为 PNG，供多模态模型识别。"""
+        out_path = out_dir / f"page_{page_no:05d}.png"
+        doc = _pdfium.PdfDocument(str(file_path))
+        try:
+            doc[page_no - 1].render(scale=_OCR_RENDER_SCALE).to_pil().save(out_path, format="PNG")
+        finally:
+            doc.close()
+        return out_path
+
+    def _pdf_fallback(self, file_path: Path) -> str:
+        """文本层缺失时的兜底：尝试 markitdown，最后退化为纯页码标记。"""
+        if self._has_markitdown:
+            try:
+                from markitdown import MarkItDown
+
+                md = MarkItDown()
+                res = md.convert(str(file_path))
+                text = (res.text_content or "").strip()
+                if text:
+                    log.info("markitdown_pdf_fallback_success", path=str(file_path), length=len(text))
+                    return f"<!-- PAGE: 1 -->\n\n{text}"
+            except Exception as fb_err:  # noqa: BLE001
+                log.warning("markitdown_pdf_fallback_failed", path=str(file_path), error=str(fb_err))
+        try:
+            total_pages = max(1, len(pypdf.PdfReader(str(file_path)).pages))
+        except Exception:  # noqa: BLE001
             return self._load_text(file_path)
+        return "\n\n".join(f"<!-- PAGE: {i} -->" for i in range(1, total_pages + 1))
 
     def _load_text(self, file_path: Path) -> str:
         """读取纯文本或 Markdown，自适应多种编码，并确保页码规范。"""
