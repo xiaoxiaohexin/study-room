@@ -356,6 +356,7 @@ class AppContainer:
             default_max_steps=s.max_steps,
             learning_store=self.learning_store,
             intent_router=self.intent_router,
+            hyde_skip_score=s.hyde_skip_score,
         )
         log.info("container_initialization_completed", status=self.status)
 

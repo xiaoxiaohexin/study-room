@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     # ---------- Query Expansion ----------
     mqe_n: int = 3
     hyde_enabled: bool = True
+    # 初筛向量命中分数达到该阈值时跳过 HyDE 的 LLM 调用。
+    hyde_skip_score: float = 0.75
 
     # ---------- RAG ----------
     chunk_size_tokens: int = 500
