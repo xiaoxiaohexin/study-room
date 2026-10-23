@@ -81,14 +81,56 @@ class ApiTokenMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class OriginGuardMiddleware(BaseHTTPMiddleware):
+    """Reject cross-site state-changing requests (CSRF defense).
+
+    The backend is usually bound to 127.0.0.1 with no API token, so any web page
+    open in the user's browser could otherwise POST to ``/tools`` or ``/mcp``.
+    Browsers always attach ``Origin`` to cross-origin POSTs; non-browser clients
+    (CLI, tests, llama.cpp server) do not send it, so they keep working.
+    """
+
+    _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+    def __init__(self, app, allowed_origins: list[str] | None = None):
+        super().__init__(app)
+        self._allowed = {o.rstrip("/") for o in (allowed_origins or [])}
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        if request.method in self._SAFE_METHODS:
+            return await call_next(request)
+
+        origin = (request.headers.get("Origin") or "").rstrip("/")
+        if origin and "*" not in self._allowed and origin not in self._allowed:
+            log.warning(
+                "cross_origin_request_rejected",
+                origin=origin,
+                path=request.url.path,
+                method=request.method,
+            )
+            err = ErrorResponse(
+                code=403,
+                error="Forbidden",
+                detail="Cross-origin request is not allowed",
+                request_id=request_id_var.get(),
+            )
+            return JSONResponse(status_code=403, content=err.model_dump())
+        return await call_next(request)
+
+
 def setup_middlewares(app: FastAPI, settings: Settings) -> None:
-    # 1. 可选 API Token 鉴权（在 CORS 之前注册，使 CORS 位于最外层并能处理预检）
+    # 1. 跨站请求防护（最内层，先于鉴权；非浏览器客户端不带 Origin 不受影响）
+    app.add_middleware(OriginGuardMiddleware, allowed_origins=settings.cors_origins)
+
+    # 2. 可选 API Token 鉴权（在 CORS 之前注册，使 CORS 位于最外层并能处理预检）
     token = settings.api_token.get_secret_value() if settings.api_token else None
     app.add_middleware(ApiTokenMiddleware, token=token)
     if token:
         log.info("api_token_authentication_enabled")
 
-    # 2. CORS 中间件
+    # 3. CORS 中间件
+    if "*" in settings.cors_origins:
+        log.warning("cors_wildcard_enabled", detail="cross-origin requests are accepted from any site")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -97,7 +139,7 @@ def setup_middlewares(app: FastAPI, settings: Settings) -> None:
         allow_headers=["*"],
     )
 
-    # 3. 请求上下文与日志追踪中间件
+    # 4. 请求上下文与日志追踪中间件
     app.add_middleware(RequestContextMiddleware)
 
     # 4. 统一参数验证异常拦截 (HTTP 422 -> 400 规范化)

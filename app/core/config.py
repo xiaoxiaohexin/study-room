@@ -101,7 +101,8 @@ class Settings(BaseSettings):
     staging_max_text_chars: int = 40_000
 
     # ---------- Server ----------
-    cors_origins: list[str] = ["*"]
+    # 默认仅允许本地 llama.cpp WebUI 开发源，不再使用通配符 "*"。
+    cors_origins: list[str] = ["http://127.0.0.1:5173", "http://localhost:5173"]
     rate_limit_per_minute: int = 60
     log_level: str = "INFO"
     # 可选 API Token：为空表示不鉴权（默认本机单用户用法）；配置后除 /health 外
