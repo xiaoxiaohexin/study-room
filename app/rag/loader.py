@@ -152,9 +152,9 @@ class DocumentLoader:
             for page_no, text in ocr_text.items():
                 page_texts[page_no - 1] = text
             text_pages = sum(1 for t in page_texts if len(t.strip()) >= _MIN_PAGE_TEXT_CHARS)
-            if text_pages == 0:
-                log.warning("pdf_ocr_produced_no_text", path=str(file_path))
-                return await asyncio.to_thread(self._pdf_fallback, file_path)
+        if text_pages == 0:
+            log.warning("pdf_ocr_produced_no_text", path=str(file_path))
+            return await asyncio.to_thread(self._pdf_fallback, file_path)
 
         page_blocks = [
             f"<!-- PAGE: {i} -->\n{text}"
