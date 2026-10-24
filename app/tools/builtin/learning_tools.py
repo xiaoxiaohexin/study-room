@@ -436,7 +436,9 @@ class ReviewTool(Tool):
             if not 0 <= quality <= 5:
                 return ToolResult(ok=False, error="quality 必须是 0~5 的整数。")
             try:
-                rec = await self.store.review_knowledge_point(kp_id, quality, user_id=context.user_id)
+                rec = await self.store.review_knowledge_point(
+                    kp_id, quality, user_id=context.user_id
+                )
             except KeyError:
                 return ToolResult(ok=False, error=f"知识点 [{kp_id}] 不存在。")
             except (PermissionError, ValueError) as e:
