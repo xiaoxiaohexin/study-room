@@ -120,6 +120,7 @@ class ToolSpec(BaseModel):
     name: str
     description: str
     parameters: dict[str, Any]
+    read_only: bool = False
 
     def to_openai(self) -> dict[str, Any]:
         return {

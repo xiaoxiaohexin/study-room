@@ -49,4 +49,5 @@ class Tool(ABC):
             name=self.name,
             description=self.description,
             parameters=self.parameters_schema,
+            read_only=self.read_only,
         )
