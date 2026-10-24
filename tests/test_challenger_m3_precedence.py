@@ -747,8 +747,10 @@ class TestAdversarialEdgeCases:
         assert len(spy.calls) >= 10
         header_calls = [c for c in spy.calls if c["namespace"] == "ns_header"]
         body_calls = [c for c in spy.calls if c["namespace"] == "ns_body"]
-        assert len(header_calls) == 5
-        assert len(body_calls) == 5
+        # 每个请求会做两次检索：HyDE 初筛（决定是否调用 LLM）+ 主检索，
+        # 两次都必须严格使用本请求解析出的命名空间，不能串台。
+        assert len(header_calls) == 10
+        assert len(body_calls) == 10
 
 
 # ============================================================================

@@ -12,7 +12,13 @@
 	import { MessageRole } from '$lib/enums';
 	import { useProcessingState } from '$lib/hooks/use-processing-state.svelte';
 	import { provenanceNavigation } from '$lib/services/provenance-navigation.service';
-	import { chatStore, modelsStore, serverStore, settingsStore } from '$lib/stores';
+	import {
+		chatStore,
+		modelsStore,
+		retrievalStatusStore,
+		serverStore,
+		settingsStore
+	} from '$lib/stores';
 	import { hasAgenticContent, modelLoadProgressText } from '$lib/utils';
 	import { Brain, Sparkles } from '@lucide/svelte';
 
@@ -82,6 +88,31 @@
 	let associatedKnowledgeNodes = $derived(
 		provenanceNavigation.getKnowledgeNodesForMessage(message.id)
 	);
+
+	const RETRIEVAL_MODE_LABELS: Record<string, string> = {
+		explain: '讲解模式',
+		quiz: '练习模式',
+		grade: '判分模式',
+		review: '复习模式',
+		plan: '规划模式',
+		homework: '作业辅导',
+		chat: '对话模式'
+	};
+
+	let retrievalStatus = $derived(
+		isLastAssistantMessage && retrievalStatusStore.current?.conversationId === message.convId
+			? retrievalStatusStore.current
+			: null
+	);
+
+	let retrievalSummary = $derived.by(() => {
+		if (!retrievalStatus) return '';
+
+		const web =
+			retrievalStatus.webSources > 0 ? ` · 联网 ${retrievalStatus.webSources} 条` : '';
+
+		return `本轮检索 · RAG ${retrievalStatus.ragHits} 段${web}`;
+	});
 
 	let assistantEl: HTMLDivElement | undefined = $state();
 	let lastUserMessageHeight = $state(0);
@@ -182,6 +213,28 @@
 					<span class="max-w-48 truncate">{knode.title}</span>
 				</button>
 			{/each}
+		</div>
+	{/if}
+
+	{#if retrievalStatus}
+		<div
+			class="retrieval-status mt-2 mb-1 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground"
+		>
+			<span
+				class="inline-flex items-center gap-1 rounded-full border border-border/70 bg-muted/40 px-2 py-0.5"
+			>
+				{retrievalSummary}
+			</span>
+			<span
+				class="inline-flex items-center gap-1 rounded-full border border-border/70 bg-muted/40 px-2 py-0.5"
+			>
+				{retrievalStatus.retrievalMode === 'none' ? '未触发检索' : '本地知识库'}
+			</span>
+			<span
+				class="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-primary"
+			>
+				{RETRIEVAL_MODE_LABELS[retrievalStatus.mode] ?? retrievalStatus.mode}
+			</span>
 		</div>
 	{/if}
 

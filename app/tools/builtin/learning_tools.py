@@ -133,7 +133,6 @@ class QuizTool(Tool):
                 "description": "题型：choice（单选）、fill（填空）、short_answer（简答），默认 choice",
             },
             "difficulty": {"type": "number", "description": "难度 0.1~1.0（默认自动按掌握度匹配）"},
-            "namespace": {"type": "string", "description": "知识库命名空间（默认 default）"},
         },
         "required": ["action"],
     }
@@ -148,9 +147,9 @@ class QuizTool(Tool):
         topic = (arguments.get("topic") or "").strip()
         q_type = arguments.get("question_type") or "choice"
         # The session scope is authoritative for both retrieval and course binding.
-        namespace = (
-            arguments.get("namespace") or context.rag_namespace or "default"
-        ).strip() or "default"
+        # The model cannot pick a knowledge base (it often mistakes a course id for
+        # a namespace, which silently empties retrieval and crosses scopes).
+        namespace = (context.rag_namespace or "default").strip() or "default"
         effective_course = context.course_id or namespace
 
         if action == "next" and not topic:
@@ -240,6 +239,7 @@ class QuizTool(Tool):
         saved = await self.store.add_question(
             kp_id=kp["id"],
             course_id=namespace,
+            user_id=context.user_id,
             q_type=q_type,
             stem=stem,
             options=options,
@@ -290,7 +290,14 @@ class GradeTool(Tool):
         if not user_answer:
             return ToolResult(ok=False, error="user_answer 不能为空。")
 
-        q = await self.store.get_question(question_id) if question_id else None
+        q = (
+            await self.store.get_question(question_id, user_id=context.user_id)
+            if question_id
+            else None
+        )
+        if question_id and not q:
+            # 指定了 question_id 却取不到：题目不存在或不属于当前用户，绝不回退到他题。
+            return ToolResult(ok=False, error=f"题目 [{question_id}] 不存在或不属于当前用户。")
         if not q:
             q = await self.store.get_latest_unanswered_question(context.user_id)
         if not q:
@@ -325,12 +332,32 @@ class GradeTool(Tool):
                 is_correct = bool(g_data.get("is_correct", score >= 0.6))
                 error_type = str(g_data.get("error_type") or ("none" if is_correct else "concept"))
                 feedback = str(g_data.get("feedback") or "")
-            except Exception:  # noqa: BLE001
-                # 兜底：关键词重合度估算
-                is_correct = q["answer"].lower() in user_answer.lower() or len(user_answer) >= 10
-                score = 0.8 if is_correct else 0.3
-                error_type = "none" if is_correct else "incomplete"
-                feedback = f"参考答案：{q['answer']}。{q.get('explanation', '')}"
+            except Exception as e:  # noqa: BLE001
+                # 兜底：LLM 结构化判分失败时不得臆断正确性。任何"字数够长即判对"的
+                # 推断都会把错误答案写进 SM-2 并拉高掌握度（审计 P0）。
+                # 这里只返回待复核状态，不记录作答、不更新掌握度与复习排期。
+                log.warning(
+                    "subjective_grade_ungraded",
+                    question_id=q["id"],
+                    user_id=context.user_id,
+                    error=str(e),
+                )
+                return ToolResult(
+                    ok=True,
+                    output=(
+                        "【判分结果】⚠️ 待复核 (ungraded) | 自动判分服务不可用，本题未计分。\n"
+                        f"- 题目ID: {q['id']} | 参考要点: {q['answer']}\n"
+                        f"- 你的作答: {user_answer}\n"
+                        "- 本次作答未写入错题本，也未更新知识点掌握度与 SM-2 复习排期。\n"
+                        f"- 解析: {q.get('explanation', '') or '（无）'}"
+                    ),
+                    metadata={
+                        "status": "ungraded",
+                        "question_id": q["id"],
+                        "user_id": context.user_id,
+                        "score": None,
+                    },
+                )
 
         rec = await self.store.record_attempt_and_update_mastery(
             user_id=context.user_id,
@@ -359,16 +386,26 @@ class GradeTool(Tool):
 
 class ReviewTool(Tool):
     name = "review_tool"
-    description = "间隔复习与错题本管理工具。支持 action='due'（查看今日到期复习知识点与未解决错题）和 action='resolve'（标记错题已掌握）。"
+    description = (
+        "间隔复习与错题本管理工具。支持 action='due'（查看今日到期复习知识点与未解决错题）、"
+        "action='resolve'（标记错题已掌握）和 action='grade'（按 SM-2 质量分记录一次闪卡自评）。"
+    )
     parameters_schema = {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["due", "resolve"],
-                "description": "due（查看待复习与错题）或 resolve（消除错题）",
+                "enum": ["due", "resolve", "grade"],
+                "description": "due（查看待复习与错题）、resolve（消除错题）或 grade（记录复习评分）",
             },
             "mistake_id": {"type": "string", "description": "要标记为已掌握的错题ID（resolve 时必填）"},
+            "kp_id": {"type": "string", "description": "要评分的知识点ID（grade 时必填）"},
+            "quality": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5,
+                "description": "SM-2 质量分 0~5（grade 时必填；<3 视为遗忘，重置复习轮次）",
+            },
         },
         "required": ["action"],
     }
@@ -386,6 +423,35 @@ class ReviewTool(Tool):
             return ToolResult(
                 ok=True,
                 output=f"错题 [{mid}] 已标记为掌握！" if ok else f"未找到错题 [{mid}]。",
+            )
+
+        if action == "grade":
+            kp_id = (arguments.get("kp_id") or "").strip()
+            if not kp_id:
+                return ToolResult(ok=False, error="kp_id 不能为空。")
+            try:
+                quality = int(arguments.get("quality"))
+            except (TypeError, ValueError):
+                return ToolResult(ok=False, error="quality 必须是 0~5 的整数。")
+            if not 0 <= quality <= 5:
+                return ToolResult(ok=False, error="quality 必须是 0~5 的整数。")
+            try:
+                rec = await self.store.review_knowledge_point(
+                    kp_id, quality, user_id=context.user_id
+                )
+            except KeyError:
+                return ToolResult(ok=False, error=f"知识点 [{kp_id}] 不存在。")
+            except (PermissionError, ValueError) as e:
+                return ToolResult(ok=False, error=str(e))
+            next_dt = datetime.datetime.fromtimestamp(rec["next_review_at"]).strftime("%Y-%m-%d %H:%M")
+            return ToolResult(
+                ok=True,
+                output=(
+                    f"【SM-2 复习评分已记录】{rec['name']} ({rec['kp_id']})\n"
+                    f"- 质量分: {rec['quality']}/5 | 掌握度: {rec['prev_mastery']:.2f} -> {rec['new_mastery']:.2f}\n"
+                    f"- 下次复习间隔: {rec['interval_days']} 天后 ({next_dt}) | EF: {rec['ef']}"
+                ),
+                metadata=rec,
             )
 
         due_list = await self.store.get_due_reviews(context.user_id, limit=10)

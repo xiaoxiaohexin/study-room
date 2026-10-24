@@ -35,6 +35,9 @@ class Tool(ABC):
     name: str
     description: str
     parameters_schema: dict[str, Any]
+    # 只读工具不改变任何服务端状态；未配置 API Token 时仅允许通过 /tools、/mcp
+    # 调用只读工具，避免恶意网页借本机浏览器触发高风险操作。
+    read_only: bool = False
 
     @abstractmethod
     async def run(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:

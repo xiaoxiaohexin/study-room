@@ -180,6 +180,7 @@ CREATE TABLE IF NOT EXISTS kp_prereq (
 
 CREATE TABLE IF NOT EXISTS questions (
     id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL DEFAULT 'default_user',
     kp_id TEXT NOT NULL,
     course_id TEXT DEFAULT 'default',
     type TEXT NOT NULL,
@@ -192,6 +193,7 @@ CREATE TABLE IF NOT EXISTS questions (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_questions_kp ON questions(kp_id);
+CREATE INDEX IF NOT EXISTS idx_questions_user ON questions(user_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS attempts (
     id TEXT PRIMARY KEY,
@@ -410,6 +412,29 @@ class SQLiteStore:
             )
             await self._db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_documents_status ON documents(tier, status)"
+            )
+
+        # 6. Migrate questions: per-user ownership so a generated question can never
+        #    be answered/graded by another user (audit P1-5).
+        cur = await self._db.execute("PRAGMA table_info(questions)")
+        rows = await cur.fetchall()
+        q_cols = {row["name"] if hasattr(row, "__getitem__") and "name" in row.keys() else row[1] for row in rows}
+        if q_cols:
+            if "user_id" not in q_cols:
+                await self._safe_add_column("questions", "user_id", "TEXT DEFAULT 'default_user'")
+            await self._db.execute(
+                "UPDATE questions SET user_id = 'default_user' WHERE user_id IS NULL OR user_id = ''"
+            )
+            # Backfill from the owning knowledge point when it is unambiguous.
+            await self._db.execute(
+                "UPDATE questions SET user_id = ("
+                "  SELECT kp.user_id FROM knowledge_points kp WHERE kp.id = questions.kp_id"
+                ") WHERE EXISTS ("
+                "  SELECT 1 FROM knowledge_points kp WHERE kp.id = questions.kp_id"
+                ") AND user_id = 'default_user'"
+            )
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_questions_user ON questions(user_id, created_at DESC)"
             )
         await self._db.commit()
 
@@ -696,6 +721,25 @@ class SQLiteStore:
     async def delete_staging_candidates_for_doc(self, doc_id: str) -> None:
         await self.conn.execute("DELETE FROM staging_candidates WHERE doc_id = ?", (doc_id,))
         await self.conn.commit()
+
+    async def list_user_ids(self, limit: int = 500) -> list[str]:
+        """Distinct users that own any state (used by the background memory maintenance)."""
+        cur = await self.conn.execute(
+            """
+            SELECT user_id FROM (
+                SELECT user_id FROM sessions
+                UNION
+                SELECT user_id FROM mastery
+                UNION
+                SELECT user_id FROM episodic_memories
+            )
+            WHERE user_id IS NOT NULL AND user_id <> ''
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cur.fetchall()
+        return [r["user_id"] for r in rows]
 
     async def aclose(self) -> None:
         async with self._lock:

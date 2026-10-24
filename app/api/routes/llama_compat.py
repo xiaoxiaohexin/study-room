@@ -26,7 +26,7 @@ from typing import Any
 from urllib.parse import unquote
 
 import httpx
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.api.deps import get_container
@@ -1200,6 +1200,13 @@ async def mcp_jsonrpc_endpoint(
     if method == "tools/call":
         tool_name = params.get("name", "")
         arguments = params.get("arguments") or {}
+        if container.tool_registry.get(tool_name) is None:
+            log.warning("mcp_tool_not_found", tool=tool_name)
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32602, "message": f"Tool not found: {tool_name}"},
+            }
         user_id = str(arguments.pop("user_id", None) or request.headers.get("X-User-Id", "default_user"))
         session_id = str(
             arguments.pop("session_id", None)
@@ -1257,6 +1264,7 @@ async def llama_webui_list_tools(container: AppContainer = Depends(get_container
         {
             "tool": s.name,
             "uses_cwd": s.name == "terminal_tool",
+            "read_only": s.read_only,
             "definition": {
                 "type": "function",
                 "function": {
@@ -1280,6 +1288,11 @@ async def llama_webui_execute_tool(
     tool_name = str(payload.get("tool", ""))
     params = dict(payload.get("params") or {})
     stream = bool(payload.get("stream", False))
+
+    # 未知工具必须显式报错（404），不能以 HTTP 200 + {"error": ...} 让前端误判为保存成功。
+    if container.tool_registry.get(tool_name) is None:
+        log.warning("webui_tool_not_found", tool=tool_name)
+        raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
 
     user_id = str(params.pop("user_id", None) or request.headers.get("X-User-Id", "default_user"))
     session_id = str(
@@ -1319,7 +1332,11 @@ async def llama_webui_execute_tool(
         return StreamingResponse(_tool_sse(), media_type="text/event-stream")
 
     if not res.ok:
-        return {"error": res.error or "Tool execution failed"}
+        # 执行失败返回 4xx，前端据此提示失败而不是当作成功。
+        return JSONResponse(
+            status_code=400,
+            content={"plain_text": res.to_str(), "error": res.error or "Tool execution failed"},
+        )
     return {"plain_text": res.to_str()}
 
 

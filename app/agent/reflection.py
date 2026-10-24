@@ -23,10 +23,24 @@ class ReflectionVerdict(BaseModel):
 class Reflector:
     def __init__(self, llm: LLMClient, interval_steps: int = 3):
         self.llm = llm
+        # 两次自省之间的最小步数间隔（避免同一异常连续触发多次 LLM 调用）
         self.interval_steps = interval_steps
 
-    def should_reflect(self, step: int) -> bool:
-        return step > 0 and (step % self.interval_steps == 0)
+    def should_reflect(
+        self,
+        step: int,
+        *,
+        tool_errors: int = 0,
+        retrieval_empty: bool = False,
+        repeated_calls: int = 0,
+    ) -> bool:
+        """只在出现异常信号时自省：工具报错、检索为空或重复调用同一工具。
+
+        正常的多步轨迹不再按固定步长无条件反思（审计 P1：异常驱动的 Reflection）。
+        """
+        if step <= 0:
+            return False
+        return tool_errors > 0 or retrieval_empty or repeated_calls > 0
 
     async def reflect(self, user_query: str, scratchpad_text: str) -> ReflectionVerdict:
         log.info("reflection_started", user_query=user_query[:50])

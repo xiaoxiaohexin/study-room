@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 # 确保本地服务 (127.0.0.1 / localhost) 绝不经过系统代理 (如 Clash/v2ray)，防止 502 Bad Gateway 与额外延迟
 os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost")
 os.environ.setdefault("no_proxy", "127.0.0.1,localhost")
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.api.middleware import setup_middlewares
 from app.api.routes.chat import router as chat_router
@@ -47,6 +49,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(session_router)
     app.include_router(learn_router)
     app.include_router(web_router)
+
+    # 可选：前端构建产物存在时由同一进程托管 WebUI（单端口部署）。
+    # WebUI 使用 hash 路由，index.html 即可覆盖所有页面；API 路由先注册，优先匹配。
+    ui_dist = Path(__file__).resolve().parent.parent / "llama-webui" / "tools" / "ui" / "dist"
+    if ui_dist.is_dir():
+        app.mount("/", StaticFiles(directory=str(ui_dist), html=True), name="ui")
 
     return app
 

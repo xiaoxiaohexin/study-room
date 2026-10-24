@@ -149,4 +149,33 @@ class PerceptualMemory(BaseMemory):
     async def list_items(
         self, user_id: str, limit: int = 50, session_id: str | None = None
     ) -> list[MemoryItem]:
-        return list(reversed(self._items.get(user_id, [])))[:limit]
+        # 以持久化向量库为准，避免重启后感知记忆"凭空消失"。
+        if self.vector_store and self.embedder:
+            col = self._collection()
+            await self.vector_store.ensure_collection(col, self.embedder.dim)
+            filters: dict[str, object] = {"user_id": user_id}
+            if session_id is not None:
+                filters["session_id"] = session_id
+            points = await self.vector_store.list_points(col, filters=filters, limit=limit)
+            items: list[MemoryItem] = []
+            for pt in points:
+                p = pt.payload or {}
+                items.append(
+                    MemoryItem(
+                        id=pt.id,
+                        type="perceptual",
+                        user_id=user_id,
+                        session_id=p.get("session_id") or None,
+                        content=str(p.get("content", "")),
+                        importance=float(p.get("importance", 0.5)),
+                        created_at=float(p.get("created_at", 0.0) or 0.0),
+                        metadata=p.get("metadata") or {},
+                    )
+                )
+            items.sort(key=lambda x: x.created_at, reverse=True)
+            return items[:limit]
+
+        items = list(reversed(self._items.get(user_id, [])))
+        if session_id is not None:
+            items = [it for it in items if it.session_id == session_id]
+        return items[:limit]

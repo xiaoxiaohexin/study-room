@@ -47,6 +47,8 @@ class KnowledgeAddRequest(BaseModel):
     provenance: dict[str, Any] | None = None
     user_id: str | None = None
     relations: list[dict[str, Any]] | None = None
+    # 前端画布标注的版本变更类型（create/edit_content/append_quote/…），写入 revision history
+    change_type: str | None = None
 
 
 class KnowledgeRelationRequest(BaseModel):
@@ -131,6 +133,7 @@ async def add_knowledge_point(
             provenance=req.provenance,
             user_id=effective_user,
             relations=req.relations,
+            change_type=req.change_type,
         )
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e)) from e

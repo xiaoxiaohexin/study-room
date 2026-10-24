@@ -811,18 +811,33 @@ class LearningStore:
         source_chunk_id: str = "",
         difficulty: float = 0.5,
         course_id: str = "default",
+        user_id: str = "default_user",
     ) -> dict[str, Any]:
         qid = f"q_{uuid.uuid4().hex[:10]}"
         now = time.time()
         opts_json = json.dumps(options or [], ensure_ascii=False)
         await self.sqlite.conn.execute(
-            "INSERT INTO questions (id, kp_id, course_id, type, stem, options_json, answer, explanation, source_chunk_id, difficulty, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (qid, kp_id, course_id, q_type, stem, opts_json, answer, explanation, source_chunk_id, difficulty, now),
+            "INSERT INTO questions (id, user_id, kp_id, course_id, type, stem, options_json, answer, explanation, source_chunk_id, difficulty, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                qid,
+                user_id,
+                kp_id,
+                course_id,
+                q_type,
+                stem,
+                opts_json,
+                answer,
+                explanation,
+                source_chunk_id,
+                difficulty,
+                now,
+            ),
         )
         await self.sqlite.conn.commit()
         return {
             "id": qid,
+            "user_id": user_id,
             "kp_id": kp_id,
             "course_id": course_id,
             "type": q_type,
@@ -834,8 +849,14 @@ class LearningStore:
             "difficulty": difficulty,
         }
 
-    async def get_question(self, question_id: str) -> dict[str, Any] | None:
-        cur = await self.sqlite.conn.execute("SELECT * FROM questions WHERE id = ?", (question_id,))
+    async def get_question(self, question_id: str, *, user_id: str | None = None) -> dict[str, Any] | None:
+        """Fetch a question. When ``user_id`` is given the question must belong to that user."""
+        if user_id is None:
+            cur = await self.sqlite.conn.execute("SELECT * FROM questions WHERE id = ?", (question_id,))
+        else:
+            cur = await self.sqlite.conn.execute(
+                "SELECT * FROM questions WHERE id = ? AND user_id = ?", (question_id, user_id)
+            )
         row = await cur.fetchone()
         if not row:
             return None
@@ -844,16 +865,17 @@ class LearningStore:
         return d
 
     async def get_latest_unanswered_question(self, user_id: str) -> dict[str, Any] | None:
-        """获取最近生成但该用户尚未作答的一道题（用于会话内直接作答自动关联）。"""
+        """获取该用户最近生成、且尚未作答的一道题（用于会话内直接作答自动关联）。"""
         cur = await self.sqlite.conn.execute(
             """
             SELECT q.* FROM questions q
-            WHERE NOT EXISTS (
+            WHERE q.user_id = ?
+              AND NOT EXISTS (
                 SELECT 1 FROM attempts a WHERE a.question_id = q.id AND a.user_id = ?
             )
             ORDER BY q.created_at DESC LIMIT 1
             """,
-            (user_id,),
+            (user_id, user_id),
         )
         row = await cur.fetchone()
         if not row:
@@ -875,9 +897,12 @@ class LearningStore:
         hints_used: int = 0,
         elapsed_sec: float = 0.0,
     ) -> dict[str, Any]:
-        q = await self.get_question(question_id)
-        kp_id = q["kp_id"] if q else "kp_general"
-        difficulty = float(q["difficulty"]) if q else 0.5
+        q = await self.get_question(question_id, user_id=user_id)
+        if not q:
+            # 判分链路强制校验题目归属：绝不允许用他人生成的题目污染掌握度/错题本。
+            raise ValueError(f"Question '{question_id}' does not exist for user '{user_id}'.")
+        kp_id = q["kp_id"]
+        difficulty = float(q["difficulty"])
         now = time.time()
 
         attempt_id = f"att_{uuid.uuid4().hex[:10]}"
@@ -972,6 +997,67 @@ class LearningStore:
         )
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
+
+    async def review_knowledge_point(
+        self, kp_id: str, quality: int, *, user_id: str = "default_user"
+    ) -> dict[str, Any]:
+        """按 SM-2 质量分推进某个知识点的复习排期（闪卡自评，不产生作答/错题记录）。"""
+        kp = await self.get_knowledge_point(kp_id, user_id=user_id)
+        if not kp:
+            raise KeyError(f"Knowledge point '{kp_id}' not found")
+
+        now = time.time()
+        q = max(0, min(5, int(quality)))
+        cur = await self.sqlite.conn.execute(
+            "SELECT * FROM mastery WHERE user_id = ? AND kp_id = ?",
+            (user_id, kp["id"]),
+        )
+        row = await cur.fetchone()
+        prev_mastery = float(row["mastery"]) if row else 0.3
+        prev_ef = float(row["ef"]) if row else 2.5
+        prev_interval = float(row["interval_days"]) if row else 0.0
+        prev_reps = int(row["repetitions"]) if row else 0
+
+        sm2 = compute_sm2(prev_ef, prev_interval, prev_reps, q, now=now)
+        new_mastery = update_mastery_ema(
+            prev_mastery, q / 5.0, difficulty=float(kp.get("difficulty") or 0.5)
+        )
+
+        await self.sqlite.conn.execute(
+            """
+            INSERT INTO mastery (user_id, kp_id, mastery, ef, interval_days, repetitions, next_review_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, kp_id) DO UPDATE SET
+                mastery = excluded.mastery,
+                ef = excluded.ef,
+                interval_days = excluded.interval_days,
+                repetitions = excluded.repetitions,
+                next_review_at = excluded.next_review_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                user_id,
+                kp["id"],
+                new_mastery,
+                sm2.ef,
+                sm2.interval_days,
+                sm2.repetitions,
+                sm2.next_review_at,
+                now,
+            ),
+        )
+        await self.sqlite.conn.commit()
+        return {
+            "kp_id": kp["id"],
+            "name": kp.get("name") or kp["id"],
+            "quality": q,
+            "prev_mastery": prev_mastery,
+            "new_mastery": new_mastery,
+            "ef": sm2.ef,
+            "interval_days": sm2.interval_days,
+            "repetitions": sm2.repetitions,
+            "next_review_at": sm2.next_review_at,
+        }
 
     async def list_mistakes(self, user_id: str, resolved: bool = False, limit: int = 20) -> list[dict[str, Any]]:
         cur = await self.sqlite.conn.execute(

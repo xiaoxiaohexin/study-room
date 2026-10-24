@@ -5,6 +5,7 @@
 	import { AgenticSectionType } from '$lib/enums';
 	import { settingsStore } from '$lib/stores';
 	import type { AgenticSection, DatabaseMessageExtra } from '$lib/types';
+	import { sanitizeUtf8Text } from '$lib/utils/utf8-text';
 
 	interface Props {
 		section: AgenticSection;
@@ -32,6 +33,8 @@
 	const REASONING_SUBTITLE_CANCELLED = '已取消';
 
 	const isPending = $derived(section.type === AgenticSectionType.REASONING_PENDING);
+	// llama.cpp can split a UTF-8 character across streamed deltas; repair it for display.
+	let displayContent = $derived(sanitizeUtf8Text(section.content));
 	const title = $derived(isPending && isStreaming ? REASONING_HEADER_PENDING : REASONING_HEADER);
 	const subtitle = $derived.by(() => {
 		if (isPending && !isStreaming) {
@@ -140,12 +143,12 @@
 		onscroll={handleScrollEvent}
 	>
 		{#if currentConfig.renderThinkingAsMarkdown}
-			<MarkdownContent {attachments} class="text-muted-foreground" content={section.content} />
+			<MarkdownContent {attachments} class="text-muted-foreground" content={displayContent} />
 		{:else}
 			<div
 				class="text-[13px] leading-relaxed wrap-break-word whitespace-pre-wrap text-muted-foreground"
 			>
-				{section.content}
+				{displayContent}
 			</div>
 		{/if}
 	</div>

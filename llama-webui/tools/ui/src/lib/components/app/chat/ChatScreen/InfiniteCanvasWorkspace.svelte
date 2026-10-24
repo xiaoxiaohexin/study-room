@@ -27,7 +27,6 @@
 		ZoomOut
 	} from '@lucide/svelte';
 	import { browser } from '$app/environment';
-	import { base } from '$app/paths';
 	import { MarkdownContent } from '$lib/components/app';
 	import { Button } from '$lib/components/ui/button';
 	import { AttachmentType, MessageRole } from '$lib/enums';
@@ -37,6 +36,7 @@
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import { provenanceNavigation } from '$lib/services/provenance-navigation.service';
+	import { ToolsService } from '$lib/services/tools.service';
 	import {
 		getActiveCourseId,
 		getActiveRagNamespace,
@@ -51,6 +51,7 @@
 		type BackendRelation
 	} from '$lib/services/canvas-sync';
 	import { buildSiblingInfoMap } from '$lib/utils';
+	import { sanitizeUtf8Text } from '$lib/utils/utf8-text';
 	import type {
 		CanvasEdge,
 		CanvasViewMode,
@@ -1158,7 +1159,13 @@
 				fetch(`/api/courses/${encodeURIComponent(courseId)}/knowledge`, { headers }),
 				fetch(`/api/courses/${encodeURIComponent(courseId)}/knowledge/relations`, { headers })
 			]);
-			if (!kpRes.ok) return;
+			if (!kpRes.ok) {
+				const payload = (await kpRes.json().catch(() => ({}))) as { detail?: string };
+				throw new Error(payload.detail || `HTTP ${kpRes.status}`);
+			}
+			if (!relRes.ok) {
+				toast.warning('知识关系同步失败，已跳过关系连线');
+			}
 
 			const kpData = (await kpRes.json()) as { knowledge_points?: BackendKnowledgePoint[] };
 			const kps = kpData.knowledge_points ?? [];
@@ -1201,6 +1208,9 @@
 			}
 		} catch (err) {
 			console.warn('Canvas backend hydration skipped:', err);
+			toast.error(
+				`无法从后端同步知识画布：${err instanceof Error ? err.message : String(err)}`
+			);
 		} finally {
 			hydrateInFlight = false;
 		}
@@ -1617,6 +1627,7 @@
 			x: node.x + node.width + 40,
 			y: node.y,
 			flipped: false,
+			cardId: node.knowledgePointId,
 			sm2Interval: 1,
 			sm2Easiness: 2.5
 		};
@@ -1806,25 +1817,32 @@
 		}
 
 		try {
-			if (isDelete) {
-				await fetch(
-					`/api/courses/${encodeURIComponent(courseId)}/knowledge/relations?src_id=${encodeURIComponent(srcId)}&rel_type=${encodeURIComponent(relType)}&dst_id=${encodeURIComponent(dstId)}`,
-					{ method: 'DELETE', headers: learningJsonHeaders() }
-				);
-			} else {
-				await fetch(`/api/courses/${encodeURIComponent(courseId)}/knowledge/relations`, {
-					body: JSON.stringify({
-						dst_id: dstId,
-						metadata: { edge_id: edge.id },
-						rel_type: relType,
-						src_id: srcId
-					}),
-					headers: learningJsonHeaders(),
-					method: 'POST'
-				});
+			const res = isDelete
+				? await fetch(
+						`/api/courses/${encodeURIComponent(courseId)}/knowledge/relations?src_id=${encodeURIComponent(srcId)}&rel_type=${encodeURIComponent(relType)}&dst_id=${encodeURIComponent(dstId)}`,
+						{ method: 'DELETE', headers: learningJsonHeaders() }
+					)
+				: await fetch(`/api/courses/${encodeURIComponent(courseId)}/knowledge/relations`, {
+						body: JSON.stringify({
+							dst_id: dstId,
+							metadata: { edge_id: edge.id },
+							rel_type: relType,
+							src_id: srcId
+						}),
+						headers: learningJsonHeaders(),
+						method: 'POST'
+					});
+
+			if (!res.ok) {
+				const payload = (await res.json().catch(() => ({}))) as { detail?: string };
+				throw new Error(payload.detail || `HTTP ${res.status}`);
 			}
 		} catch (err) {
-			console.warn('Backend relation sync skipped:', err);
+			toast.error(
+				`${isDelete ? '删除' : '保存'}知识关系失败：${
+					err instanceof Error ? err.message : String(err)
+				}`
+			);
 		}
 	}
 
@@ -2271,24 +2289,19 @@
 		savingNodeId = node.id;
 
 		try {
-			const res = await fetch(`${base}/tools`, {
-				body: JSON.stringify({
-					arguments: {
-						action: 'create',
-						content: node.content,
-						title: node.title.replace(/^📝\s*/, '') || '画布便签'
-					},
-					name: 'note_tool'
-				}),
-				headers: { 'Content-Type': 'application/json' },
-				method: 'POST'
+			const result = await ToolsService.executeTool('note_tool', {
+				action: 'create',
+				content: node.content,
+				title: node.title.replace(/^📝\s*/, '') || '画布便签'
 			});
 
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			if (result.isError) throw new Error(result.content);
 
-			toast.success('便签已同步保存到后端 Markdown 笔记库');
-		} catch {
-			toast.error('保存便签到后端失败');
+			toast.success(`便签已保存到后端笔记库（${result.content}）`);
+		} catch (err) {
+			toast.error(
+				`保存便签到后端失败：${err instanceof Error ? err.message : String(err)}`
+			);
 		} finally {
 			savingNodeId = null;
 		}
@@ -2302,29 +2315,23 @@
 		savingNodeId = nodeId;
 
 		try {
-			const res = await fetch(`${base}/tools`, {
-				body: JSON.stringify({
-					arguments: { limit: 1 },
-					name: 'review_tool'
-				}),
-				headers: { 'Content-Type': 'application/json' },
-				method: 'POST'
-			});
+			const result = await ToolsService.executeTool('review_tool', { action: 'due' });
 
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			if (result.isError) throw new Error(result.content);
 
-			const data = await res.json();
-			const text: string = data.content ?? '';
+			const text = result.content;
 
-			if (text && !text.includes('暂无待复习')) {
+			if (text && !text.includes('暂无到期')) {
 				customNodes[idx].content = text;
 				customNodes[idx].flipped = false;
 				toast.success('已从后端拉取待复习闪卡');
 			} else {
 				toast.info('当前暂无到期闪卡，已为你保留示例闪卡');
 			}
-		} catch {
-			toast.error('同步后端复习卡片失败');
+		} catch (err) {
+			toast.error(
+				`同步后端复习卡片失败：${err instanceof Error ? err.message : String(err)}`
+			);
 		} finally {
 			savingNodeId = null;
 			persistCanvasState();
@@ -2350,21 +2357,28 @@
 		customNodes[idx].flipped = false;
 		persistCanvasState();
 
-		toast.success(`SM-2 评分已记录（评分 ${quality} → 下次复习间隔 ${nextInterval} 天，EF=${nextEf}）`);
+		if (!node.cardId) {
+			toast.success(`SM-2 评分已记录（评分 ${quality} → 下次复习间隔 ${nextInterval} 天，EF=${nextEf}）`);
 
-		if (node.cardId) {
-			try {
-				await fetch(`${base}/tools`, {
-					body: JSON.stringify({
-						arguments: { card_id: node.cardId, quality },
-						name: 'grade_tool'
-					}),
-					headers: { 'Content-Type': 'application/json' },
-					method: 'POST'
-				});
-			} catch {
-				// Ignore background sync error
-			}
+			return;
+		}
+
+		try {
+			const result = await ToolsService.executeTool('review_tool', {
+				action: 'grade',
+				kp_id: node.cardId,
+				quality
+			});
+
+			if (result.isError) throw new Error(result.content);
+
+			toast.success(
+				`SM-2 评分已记录并同步后端（评分 ${quality} → 下次复习间隔 ${nextInterval} 天，EF=${nextEf}）`
+			);
+		} catch (err) {
+			toast.warning(
+				`本地已记录评分，但后端同步失败：${err instanceof Error ? err.message : String(err)}`
+			);
 		}
 	}
 
@@ -3398,8 +3412,15 @@
 
 			<!-- 2. Automatic Conversation Turn Nodes (Top Image Carousel Dock + User Prompt + Linked Knowledge/Memory + Assistant Response) -->
 			{#each chatTurnNodes as turn (turn.id)}
-				{@const reasoningText =
-					turn.assistantMessage?.reasoningContent || turn.assistantMessage?.thinking || ''}
+				{@const reasoningText = sanitizeUtf8Text(
+					turn.assistantMessage?.reasoningContent || turn.assistantMessage?.thinking || ''
+				)}
+				{@const isStreamingTurn =
+					turn === chatTurnNodes[chatTurnNodes.length - 1] &&
+					(chatStore.isStreaming() || chatStore.isLoading)}
+				{@const assistantText =
+					turn.assistantMessage.content ||
+					(isStreamingTurn ? '正在生成回复…' : '（本轮生成已取消）')}
 				{@const isReasonOpen = expandedReasoning[turn.id] ?? false}
 				{@const assoc = turnAssociations[turn.id]}
 				{@const turnImages = getTurnImages(turn)}
@@ -4018,7 +4039,7 @@
 								<div class="prose prose-sm dark:prose-invert max-w-none text-xs leading-relaxed">
 									<MarkdownContent
 										attachments={turn.assistantMessage.extra}
-										content={turn.assistantMessage.content || '正在生成回复…'}
+										content={assistantText}
 									/>
 								</div>
 							{:else if chatStore.isLoading}
