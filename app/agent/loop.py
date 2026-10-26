@@ -115,7 +115,7 @@ class AgentLoop:
 
         yield AgentEvent(type=EventType.SESSION, step=0, data={"session_id": session_id})
 
-        # 0. 学习意图路由（决定教学模式、专属教学 Prompt 与精简工具子集）
+        # 0. 意图模式路由（决定执行模式、模式附加指令与精简工具子集）
         active_tool_names: list[str] | None = None
         base_system_prompt = AGENT_SYSTEM_PROMPT
         active_mode = request.mode or "chat"
@@ -145,7 +145,7 @@ class AgentLoop:
                     "tools": decision.tool_names,
                     "retrieval_mode": decision.retrieval_mode,
                     "web_allowed": decision.allow_web_fallback,
-                    "detail": f"学习模式路由: [{decision.mode}] ({decision.reason}) | 挂载工具: {', '.join(decision.tool_names)}",
+                    "detail": f"意图模式路由: [{decision.mode}] ({decision.reason}) | 挂载工具: {', '.join(decision.tool_names)}",
                 },
             )
 
@@ -160,7 +160,7 @@ class AgentLoop:
             or None
         )
 
-        # 1. 查询扩展（带图请求或判卷/复习/计划模式跳过文本扩展，减少本地模型排队延迟）
+        # 1. 查询扩展（带图请求或闭环评估/重放/编排模式跳过文本扩展，减少本地模型排队延迟）
         queries = [request.message]
         hyde_doc = None
         skip_expansion_modes = {"grade", "quiz", "review", "plan", "homework"}
@@ -195,11 +195,11 @@ class AgentLoop:
             queries = expanded.all_queries
             hyde_doc = expanded.hypothetical_doc
 
-        # 2. 多源信息并行召回 + 学习者画像获取
+        # 2. 多源信息并行召回 + 状态遥测画像获取
         yield AgentEvent(
             type=EventType.STATUS,
             step=0,
-            data={"stage": "retrieval", "detail": "正在并行检索学情画像、用户记忆与知识库..."},
+            data={"stage": "retrieval", "detail": "正在并行检索状态遥测、用户记忆与知识库..."},
         )
         if retrieval_mode == "none":
             memories, docs, learner_profile = [], [], ""
@@ -268,7 +268,7 @@ class AgentLoop:
             # 组装本轮会话的全部消息
             current_messages = list(built_ctx.messages) + scratchpad_messages
 
-            # 调用 LLM（仅挂载当前学习模式所需的精简工具子集）
+            # 调用 LLM（仅挂载当前执行模式所需的精简工具子集）
             specs = (
                 self.tools.specs(names=active_tool_names)
                 if self.use_native_tools and expose_tools

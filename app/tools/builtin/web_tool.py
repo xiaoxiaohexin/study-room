@@ -1,7 +1,7 @@
 """联网工具（WebTool）：搜索/抓取网页并存入临时知识库，支持一键提纯晋升与重复查询防死循环保护。
 
 该工具注册在 ToolRegistry 中，因此会同时出现在 /tools 与 /mcp 的 tools/list 里；
-执行作用域（session/user/课程）来自 ToolContext，与其它学习工具保持一致。
+执行作用域（session/user/知识域）来自 ToolContext，与其它内置工具保持一致。
 """
 
 from __future__ import annotations

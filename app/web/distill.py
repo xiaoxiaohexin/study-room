@@ -109,7 +109,7 @@ class DistillationService:
     ) -> list[dict[str, Any]]:
         material = "\n\n".join(excerpts)[:7000]
         prompt = (
-            "你是一个学习资料整理助手。请把下面网页内容提炼成 1~3 个可直接用于复习的"
+            "你是一个知识提纯与结构化提取助手。请把下面网页内容提炼成 1~3 个可直接用于沉淀的"
             "知识节点候选。要求：\n"
             "1. title 是概念名（不超过 20 字）；summary 是一句话解释；\n"
             "2. content 是结构化要点（Markdown，保留公式/关键步骤，不要照抄全文）；\n"

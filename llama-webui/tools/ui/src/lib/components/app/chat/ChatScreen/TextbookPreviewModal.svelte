@@ -129,7 +129,7 @@
 		class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs"
 		role="dialog"
 		aria-modal="true"
-		aria-label="教材出处预览"
+		aria-label="文档溯源预览"
 	>
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div
@@ -141,7 +141,7 @@
 					<span class="text-base">📖</span>
 					<div class="min-w-0">
 						<h3 class="truncate text-sm font-semibold text-foreground">
-							{target.docTitle || '参考教材'}
+							{target.docTitle || '知识源文档'}
 						</h3>
 						<p class="font-mono text-[11px] text-muted-foreground">
 							物理页码: P.{currentPage}{totalPages && totalPages > 1
@@ -198,7 +198,7 @@
 				{#if loading}
 					<div class="flex items-center justify-center gap-2 p-8 text-xs text-muted-foreground">
 						<Loader2 class="h-4 w-4 animate-spin" />
-						正在读取教材原文…
+						正在读取文档原文…
 					</div>
 				{:else if error}
 					<div class="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 text-xs text-amber-700 dark:text-amber-300">
@@ -207,7 +207,7 @@
 				{:else if pageImage}
 					<div class="flex flex-col items-center gap-2">
 						<img
-							alt={`{target.docTitle || '教材'} 第 ${currentPage} 页`}
+							alt={`{target.docTitle || '文档'} 第 ${currentPage} 页`}
 							class="w-full rounded-lg border border-border/60 shadow"
 							src={pageImage}
 						/>
@@ -234,7 +234,7 @@
 
 			<div class="flex items-center justify-between border-t border-border/80 bg-muted/20 px-4 py-2.5">
 				<span class="text-[11px] text-muted-foreground">
-					来源：{target.docTitle || '参考教材'} · P.{currentPage}
+					来源：{target.docTitle || '知识源文档'} · P.{currentPage}
 				</span>
 				<button
 					class="rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-accent"

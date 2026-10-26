@@ -1,4 +1,9 @@
-"""学习领域专用工具集：知识点管理、智能出题、判分诊断（SM-2 + 掌握度更新）、间隔复习与学情规划。"""
+"""闭环控制与知识验证工具集：结构化知识节点管理、基于 RAG 知识源生成测试、自动化混合裁决评估（SM-2 衰减调度 + EMA 稳健度更新）、衰减重放与失败任务软收敛、状态遥测与优化流水线编排。
+
+核心架构与功能咬合说明：
+- 最原始的逻辑：一个**“基于 RAG 检索知识源生成测试 -> 自动化混合裁决评估 -> 基于记忆衰减（SM-2）计算下一次重放时间 -> 自动收集失败任务并编排优化流水线”**的闭环控制系统。
+- 删数据的逻辑：Agent 端严禁硬删除，业务端采用软状态标记（Soft Resolve），仅在底层维护受用户作用域隔离的级联物理删除。
+"""
 
 from __future__ import annotations
 
@@ -43,8 +48,14 @@ _SUBJECTIVE_GRADE_SCHEMA = {
 
 
 class KnowledgeTool(Tool):
+    """结构化知识节点管理工具。
+
+    遵循数据安全策略：Agent 端仅暴露查询与幂等写入（list / create / get），严禁暴露硬删除操作；
+    物理级联删除仅在底层受用户作用域隔离的存储管理接口中维护。
+    """
+
     name = "knowledge_tool"
-    description = "管理与查询课程知识点。支持操作：list（列出知识点）、create（新增/更新知识点）、get（按名称或ID查询知识点详情）。"
+    description = "管理与检索结构化知识节点。支持操作：list（列出知识节点）、create（新增/更新知识节点）、get（按名称或ID查询知识节点详情）。Agent 端严禁硬删除。"
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -53,10 +64,10 @@ class KnowledgeTool(Tool):
                 "enum": ["list", "create", "get"],
                 "description": "操作类型：list / create / get",
             },
-            "course_id": {"type": "string", "description": "课程ID或命名空间（默认 default）"},
-            "name": {"type": "string", "description": "知识点名称（create/get 时使用）"},
-            "summary": {"type": "string", "description": "知识点核心定义或摘要（create 时使用）"},
-            "difficulty": {"type": "number", "description": "难度系数 0.1~1.0（默认 0.5）"},
+            "course_id": {"type": "string", "description": "所属知识域ID或命名空间（默认 default）"},
+            "name": {"type": "string", "description": "知识节点名称（create/get 时使用）"},
+            "summary": {"type": "string", "description": "知识节点核心定义或摘要（create 时使用）"},
+            "difficulty": {"type": "number", "description": "复杂度权重系数 0.1~1.0（默认 0.5）"},
         },
         "required": ["action"],
     }
@@ -73,7 +84,7 @@ class KnowledgeTool(Tool):
         if action == "create":
             name = (arguments.get("name") or "").strip()
             if not name:
-                return ToolResult(ok=False, error="知识点名称 name 不能为空。")
+                return ToolResult(ok=False, error="知识节点名称 name 不能为空。")
             summary = arguments.get("summary") or ""
             difficulty = float(arguments.get("difficulty") or 0.5)
             try:
@@ -88,7 +99,7 @@ class KnowledgeTool(Tool):
                 return ToolResult(ok=False, error=str(e))
             return ToolResult(
                 ok=True,
-                output=f"已保存知识点 [{kp['id']}] {kp['name']} (课程: {kp['course_id']}, 难度: {kp['difficulty']}): {kp['summary']}",
+                output=f"已保存知识节点 [{kp['id']}] {kp['name']} (知识域: {kp['course_id']}, 复杂度: {kp['difficulty']}): {kp['summary']}",
                 metadata=kp,
             )
 
@@ -98,10 +109,10 @@ class KnowledgeTool(Tool):
                 name, course_id=course_id, user_id=context.user_id
             )
             if not kp:
-                return ToolResult(ok=True, output=f"未找到知识点 '{name}'。")
+                return ToolResult(ok=True, output=f"未找到知识节点 '{name}'。")
             return ToolResult(
                 ok=True,
-                output=f"知识点 [{kp['id']}] {kp['name']} (课程: {kp['course_id']}, 难度: {kp['difficulty']})\n摘要: {kp['summary']}",
+                output=f"知识节点 [{kp['id']}] {kp['name']} (知识域: {kp['course_id']}, 复杂度: {kp['difficulty']})\n摘要: {kp['summary']}",
                 metadata=kp,
             )
 
@@ -110,29 +121,31 @@ class KnowledgeTool(Tool):
             user_id=context.user_id,
         )
         if not kps:
-            return ToolResult(ok=True, output=f"课程 [{course_id}] 暂无已录入的知识点。")
-        lines = [f"- [{k['id']}] {k['name']} (难度: {k['difficulty']}): {k['summary']}" for k in kps]
-        return ToolResult(ok=True, output=f"知识点列表 ({len(kps)} 个):\n" + "\n".join(lines))
+            return ToolResult(ok=True, output=f"知识域 [{course_id}] 暂无已录入的知识节点。")
+        lines = [f"- [{k['id']}] {k['name']} (复杂度: {k['difficulty']}): {k['summary']}" for k in kps]
+        return ToolResult(ok=True, output=f"知识节点列表 ({len(kps)} 个):\n" + "\n".join(lines))
 
 
 class QuizTool(Tool):
+    """基于 RAG 检索知识源生成基准测试任务与待测项抽取工具（闭环控制第 1 环）。"""
+
     name = "quiz_tool"
-    description = "智能出题与练习工具。支持 action='generate'（结合知识库教材按知识点与题型出题）或 action='next'（获取当前待做题目或針對薄弱点出题）。"
+    description = "基于 RAG 检索知识源生成验证测试任务。支持 action='generate'（结合向量知识库文档按目标节点与任务类型生成结构化测试项）或 action='next'（获取当前待处理测试项或针对到期/低稳健度节点生成测试）。"
     parameters_schema = {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
                 "enum": ["generate", "next"],
-                "description": "generate（生成新题）或 next（获取下一题）",
+                "description": "generate（生成新测试项）或 next（获取下一待测任务）",
             },
-            "topic": {"type": "string", "description": "要考察的知识点名称或主题"},
+            "topic": {"type": "string", "description": "要验证的知识节点名称或目标主题"},
             "question_type": {
                 "type": "string",
                 "enum": ["choice", "fill", "short_answer"],
-                "description": "题型：choice（单选）、fill（填空）、short_answer（简答），默认 choice",
+                "description": "测试任务类型：choice（客观单选）、fill（精确匹配填空）、short_answer（开放式简答），默认 choice",
             },
-            "difficulty": {"type": "number", "description": "难度 0.1~1.0（默认自动按掌握度匹配）"},
+            "difficulty": {"type": "number", "description": "复杂度系数 0.1~1.0（默认自动按当前节点稳健度自适应计算）"},
         },
         "required": ["action"],
     }
@@ -146,9 +159,7 @@ class QuizTool(Tool):
         action = arguments.get("action", "generate")
         topic = (arguments.get("topic") or "").strip()
         q_type = arguments.get("question_type") or "choice"
-        # The session scope is authoritative for both retrieval and course binding.
-        # The model cannot pick a knowledge base (it often mistakes a course id for
-        # a namespace, which silently empties retrieval and crosses scopes).
+        # 会话级作用域强制收口：检索命名空间与知识域绑定以会话上下文为准，防止越权跨库检索。
         namespace = (context.rag_namespace or "default").strip() or "default"
         effective_course = context.course_id or namespace
 
@@ -158,7 +169,7 @@ class QuizTool(Tool):
                 opts_txt = "\n".join(pending["options"]) if pending.get("options") else ""
                 return ToolResult(
                     ok=True,
-                    output=f"【待作答题目】ID: {pending['id']} | 题型: {pending['type']}\n题干: {pending['stem']}\n{opts_txt}",
+                    output=f"【待评估测试项】ID: {pending['id']} | 类型: {pending['type']}\n任务描述: {pending['stem']}\n{opts_txt}",
                     metadata=pending,
                 )
             due = await self.store.get_due_reviews(context.user_id, limit=1)
@@ -168,7 +179,7 @@ class QuizTool(Tool):
         if not topic:
             topic = "核心基础概念"
 
-        # 确保知识点存在
+        # 确保关联知识节点存在
         kp = await self.store.get_knowledge_point(
             topic, course_id=effective_course, user_id=context.user_id
         )
@@ -177,13 +188,13 @@ class QuizTool(Tool):
                 kp = await self.store.upsert_knowledge_point(
                     course_id=effective_course,
                     name=topic,
-                    summary=f"{topic} 相关概念与应用",
+                    summary=f"{topic} 相关机制与应用",
                     user_id=context.user_id,
                 )
             except (PermissionError, ValueError) as e:
                 return ToolResult(ok=False, error=str(e))
 
-        # 自适应难度：若未指定，取当前掌握度 + 0.1
+        # 自适应复杂度：若未显式指定，取当前节点稳健度指标 + 0.1
         difficulty = arguments.get("difficulty")
         if difficulty is None:
             report = await self.store.get_progress_report(context.user_id)
@@ -192,18 +203,18 @@ class QuizTool(Tool):
         else:
             difficulty = float(difficulty)
 
-        # 检索教材原文作为出题依据
+        # 基于 RAG 检索知识源文档切片作为生成基准测试的事实依据
         docs = await self.retriever.search([topic], namespace=namespace, top_k=2)
         source_chunk_id = docs[0].id if docs else ""
-        ref_text = "\n\n".join(d.content for d in docs) if docs else "（知识库中暂无对应原文，请基于该学科标准通用知识出题）"
+        ref_text = "\n\n".join(d.content for d in docs) if docs else "（当前知识源中暂无对应文档切片，请基于领域标准通用事实生成测试）"
 
         prompt = (
-            f"请围绕知识点【{topic}】（难度系数 {difficulty}，题型：{q_type}）命制 1 道高质量练习题。\n"
-            f"参考教材资料：\n{ref_text}\n\n"
+            f"请围绕目标知识节点【{topic}】（复杂度系数 {difficulty}，测试类型：{q_type}）构建 1 项高质量基准验证测试任务。\n"
+            f"参考知识源片段：\n{ref_text}\n\n"
             "要求：\n"
-            "1. 若题型为 choice（单选题），options 必须为包含 4 个选项的字符串数组（如 [\"A. ...\", \"B. ...\", \"C. ...\", \"D. ...\"]），answer 为单个大写字母（如 \"A\"）。\n"
-            "2. 若题型为 fill 或 short_answer，options 设为空数组 []。\n"
-            "3. 严格输出 JSON 对象，包含 stem, options, answer, explanation 四个字段。"
+            "1. 若类型为 choice（单选），options 必须为包含 4 个候选项的字符串数组（如 [\"A. ...\", \"B. ...\", \"C. ...\", \"D. ...\"]），answer 为单个大写字母（如 \"A\"）。\n"
+            "2. 若类型为 fill 或 short_answer，options 设为空数组 []。\n"
+            "3. 严格输出 JSON 对象，包含 stem（任务题干）, options（候选项）, answer（标准基准答案）, explanation（判定依据与解析）四个字段。"
         )
 
         try:
@@ -221,20 +232,20 @@ class QuizTool(Tool):
         except Exception as e:  # noqa: BLE001
             log.warning("quiz_llm_json_fallback", error=str(e))
             if q_type == "choice":
-                stem = f"关于【{topic}】，下列说法正确的是哪一项？"
+                stem = f"关于【{topic}】，下列命题成立的是哪一项？"
                 options = [
                     f"A. {topic} 的核心定义与基本性质成立",
-                    "B. 该概念在任何条件下均不成立",
-                    "C. 该概念与课程主题完全无关",
-                    "D. 以上说法均不正确",
+                    "B. 该机制在任何条件下均不成立",
+                    "C. 该节点与当前知识域完全无关",
+                    "D. 以上命题均不正确",
                 ]
                 answer = "A"
-                explanation = f"考察 {topic} 的基础概念辨析。"
+                explanation = f"验证 {topic} 的核心概念与约束条件。"
             else:
-                stem = f"请用自己的话简述【{topic}】的核心定义与应用场景。"
+                stem = f"请简述【{topic}】的核心定义与典型应用场景。"
                 options = []
                 answer = f"{topic}的核心定义与基本性质"
-                explanation = f"考察对 {topic} 的理解与归纳。"
+                explanation = f"验证对 {topic} 的结构化归纳。"
 
         saved = await self.store.add_question(
             kp_id=kp["id"],
@@ -252,28 +263,30 @@ class QuizTool(Tool):
         return ToolResult(
             ok=True,
             output=(
-                f"已生成练习题（请展示给学生作答，切勿剧透答案）：\n"
-                f"- 题目ID: {saved['id']}\n"
-                f"- 知识点: {kp['name']} ({kp['id']})\n"
-                f"- 题型: {q_type} | 难度: {difficulty}\n"
-                f"- 题干: {stem}{opts_block}"
+                f"已生成验证测试任务（仅展示任务内容以供提交响应，请勿提前暴露基准答案）：\n"
+                f"- 任务ID: {saved['id']}\n"
+                f"- 关联节点: {kp['name']} ({kp['id']})\n"
+                f"- 任务类型: {q_type} | 复杂度: {difficulty}\n"
+                f"- 任务内容: {stem}{opts_block}"
             ),
             metadata=saved,
         )
 
 
 class GradeTool(Tool):
+    """自动化混合裁决评估工具（闭环控制第 2 & 3 环：客观规则 + 主观 LLM 混合裁决 -> EMA 稳健度更新 & SM-2 衰减重放计算 -> 失败任务自动归档）。"""
+
     name = "grade_tool"
-    description = "对学生的作答进行判分、错因诊断，并自动更新知识点掌握度（Mastery）、SM-2 复习排期与错题本。"
+    description = "对提交的测试响应执行自动化混合裁决评估、偏差归因分析，并自动更新知识节点稳健度（EMA）、计算基于记忆衰减（SM-2）的下一次重放时间及归档失败任务。"
     parameters_schema = {
         "type": "object",
         "properties": {
-            "user_answer": {"type": "string", "description": "学生提交的答案内容（如 'A' 或具体解答文本）"},
+            "user_answer": {"type": "string", "description": "提交的候选响应内容（如 'A' 或具体解答文本）"},
             "question_id": {
                 "type": "string",
-                "description": "题目ID（如 q_xxx；若留空则自动匹配当前最新待作答题目）",
+                "description": "测试任务ID（如 q_xxx；若留空则自动匹配当前最新待评估测试任务）",
             },
-            "hints_used": {"type": "integer", "description": "学生作答前使用的提示阶数（默认 0）"},
+            "hints_used": {"type": "integer", "description": "前置辅助引导阶数（默认 0，用于折算 SM-2 质量分）"},
         },
         "required": ["user_answer"],
     }
@@ -296,29 +309,29 @@ class GradeTool(Tool):
             else None
         )
         if question_id and not q:
-            # 指定了 question_id 却取不到：题目不存在或不属于当前用户，绝不回退到他题。
-            return ToolResult(ok=False, error=f"题目 [{question_id}] 不存在或不属于当前用户。")
+            # 显式指定了 question_id 但未命中：任务不存在或不属于当前用户作用域，严禁跨任务回退。
+            return ToolResult(ok=False, error=f"测试任务 [{question_id}] 不存在或不属于当前用户。")
         if not q:
             q = await self.store.get_latest_unanswered_question(context.user_id)
         if not q:
-            return ToolResult(ok=False, error="未找到待判分的题目，请先调用 quiz_tool 生成题目或指定有效的 question_id。")
+            return ToolResult(ok=False, error="未找到待评估的测试任务，请先调用 quiz_tool 生成测试任务或指定有效的 question_id。")
 
         q_type = q["type"]
         if q_type in ("choice", "fill"):
             is_correct, score = grade_objective(q_type, q["answer"], user_answer)
             error_type = "none" if is_correct else "concept"
             feedback = (
-                f"回答正确！标准答案：{q['answer']}。{q.get('explanation', '')}"
+                f"裁决通过！基准答案：{q['answer']}。{q.get('explanation', '')}"
                 if is_correct
-                else f"回答有误。你的答案：{user_answer}，标准答案：{q['answer']}。解析：{q.get('explanation', '')}"
+                else f"裁决未通过。提交内容：{user_answer}，基准答案：{q['answer']}。诊断依据：{q.get('explanation', '')}"
             )
         else:
-            # 主观简答题使用 LLM 按评分标准输出 JSON
+            # 开放式任务使用 LLM 按结构化 Schema 进行混合裁决
             grade_prompt = (
-                f"题目：{q['stem']}\n"
-                f"参考答案与解析：{q['answer']} ({q.get('explanation', '')})\n"
-                f"学生作答：{user_answer}\n\n"
-                "请公正评分并输出 JSON：is_correct(布尔), score(0.0~1.0), error_type(none/concept/calculation/misread/incomplete), feedback(简明评语)。"
+                f"测试任务：{q['stem']}\n"
+                f"基准答案与判定依据：{q['answer']} ({q.get('explanation', '')})\n"
+                f"提交响应：{user_answer}\n\n"
+                "请客观执行裁决评估并输出 JSON：is_correct(布尔), score(0.0~1.0), error_type(none/concept/calculation/misread/incomplete), feedback(简明诊断结论)。"
             )
             try:
                 g_data = await chat_json(
@@ -333,9 +346,8 @@ class GradeTool(Tool):
                 error_type = str(g_data.get("error_type") or ("none" if is_correct else "concept"))
                 feedback = str(g_data.get("feedback") or "")
             except Exception as e:  # noqa: BLE001
-                # 兜底：LLM 结构化判分失败时不得臆断正确性。任何"字数够长即判对"的
-                # 推断都会把错误答案写进 SM-2 并拉高掌握度（审计 P0）。
-                # 这里只返回待复核状态，不记录作答、不更新掌握度与复习排期。
+                # 兜底保护：LLM 结构化裁决服务不可用时严禁臆断通过，否则会污染 SM-2 衰减周期与稳健度指标（审计 P0）。
+                # 仅返回待复核状态（ungraded），不写入执行记录、不触发状态更新。
                 log.warning(
                     "subjective_grade_ungraded",
                     question_id=q["id"],
@@ -345,11 +357,11 @@ class GradeTool(Tool):
                 return ToolResult(
                     ok=True,
                     output=(
-                        "【判分结果】⚠️ 待复核 (ungraded) | 自动判分服务不可用，本题未计分。\n"
-                        f"- 题目ID: {q['id']} | 参考要点: {q['answer']}\n"
-                        f"- 你的作答: {user_answer}\n"
-                        "- 本次作答未写入错题本，也未更新知识点掌握度与 SM-2 复习排期。\n"
-                        f"- 解析: {q.get('explanation', '') or '（无）'}"
+                        "【裁决评估结果】⚠️ 待复核 (ungraded) | 自动裁决服务不可用，本项未计入统计。\n"
+                        f"- 任务ID: {q['id']} | 基准要点: {q['answer']}\n"
+                        f"- 提交内容: {user_answer}\n"
+                        "- 本次响应未写入失败任务集，也未更新节点稳健度与 SM-2 重放排期。\n"
+                        f"- 判定依据: {q.get('explanation', '') or '（无）'}"
                     ),
                     metadata={
                         "status": "ungraded",
@@ -370,25 +382,30 @@ class GradeTool(Tool):
             hints_used=hints_used,
         )
         next_dt = datetime.datetime.fromtimestamp(rec["next_review_at"]).strftime("%Y-%m-%d %H:%M")
-        status_str = "✅ 正确" if is_correct else f"❌ 错误 (已自动加入错题本 {rec['mistake_id']})"
+        status_str = "✅ 评估通过" if is_correct else f"❌ 评估未通过 (已自动收集至失败任务集 {rec['mistake_id']})"
         return ToolResult(
             ok=True,
             output=(
-                f"【判分结果】{status_str} | 得分: {score:.2f} | SM-2 质量分: {rec['quality']}\n"
-                f"- 题目ID: {q['id']} | 标准答案: {q['answer']}\n"
-                f"- 知识点掌握度更新: {rec['prev_mastery']:.2f} -> {rec['new_mastery']:.2f}\n"
-                f"- 下次复习间隔: {rec['interval_days']} 天后 ({next_dt})\n"
-                f"- 解析与诊断: {feedback}"
+                f"【裁决评估结果】{status_str} | 得分: {score:.2f} | SM-2 质量分: {rec['quality']}\n"
+                f"- 任务ID: {q['id']} | 基准答案: {q['answer']}\n"
+                f"- 节点稳健度更新 (EMA): {rec['prev_mastery']:.2f} -> {rec['new_mastery']:.2f}\n"
+                f"- 下次重放时间 (SM-2): {rec['interval_days']} 天后 ({next_dt})\n"
+                f"- 诊断结论: {feedback}"
             ),
             metadata=rec,
         )
 
 
 class ReviewTool(Tool):
+    """基于记忆衰减（SM-2）的重放调度与失败任务软收敛工具。
+
+    遵循数据删除策略：业务端对失败任务集采用软状态标记（Soft Resolve: resolved=1），Agent 端严禁硬删除。
+    """
+
     name = "review_tool"
     description = (
-        "间隔复习与错题本管理工具。支持 action='due'（查看今日到期复习知识点与未解决错题）、"
-        "action='resolve'（标记错题已掌握）和 action='grade'（按 SM-2 质量分记录一次闪卡自评）。"
+        "基于衰减模型（SM-2）的重放调度与失败任务集管理工具。支持 action='due'（查询当前到期需重放的知识节点与未收敛失败任务）、"
+        "action='resolve'（软状态标记失败任务为已收敛 Soft Resolve，严禁硬删除）和 action='grade'（按 SM-2 质量分推进节点重放周期）。"
     )
     parameters_schema = {
         "type": "object",
@@ -396,15 +413,15 @@ class ReviewTool(Tool):
             "action": {
                 "type": "string",
                 "enum": ["due", "resolve", "grade"],
-                "description": "due（查看待复习与错题）、resolve（消除错题）或 grade（记录复习评分）",
+                "description": "due（查询到期重放项与失败任务）、resolve（软标记失败任务已收敛）或 grade（记录 SM-2 重放评分）",
             },
-            "mistake_id": {"type": "string", "description": "要标记为已掌握的错题ID（resolve 时必填）"},
-            "kp_id": {"type": "string", "description": "要评分的知识点ID（grade 时必填）"},
+            "mistake_id": {"type": "string", "description": "要软标记为已收敛的失败任务记录ID（resolve 时必填）"},
+            "kp_id": {"type": "string", "description": "要更新重放周期的知识节点ID（grade 时必填）"},
             "quality": {
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 5,
-                "description": "SM-2 质量分 0~5（grade 时必填；<3 视为遗忘，重置复习轮次）",
+                "description": "SM-2 质量分 0~5（grade 时必填；<3 视为衰减失效，重置重放轮次）",
             },
         },
         "required": ["action"],
@@ -422,7 +439,7 @@ class ReviewTool(Tool):
             ok = await self.store.resolve_mistake(context.user_id, mid)
             return ToolResult(
                 ok=True,
-                output=f"错题 [{mid}] 已标记为掌握！" if ok else f"未找到错题 [{mid}]。",
+                output=f"失败任务记录 [{mid}] 已执行软状态收敛标记（Soft Resolve）！" if ok else f"未找到失败任务记录 [{mid}]。",
             )
 
         if action == "grade":
@@ -440,16 +457,16 @@ class ReviewTool(Tool):
                     kp_id, quality, user_id=context.user_id
                 )
             except KeyError:
-                return ToolResult(ok=False, error=f"知识点 [{kp_id}] 不存在。")
+                return ToolResult(ok=False, error=f"知识节点 [{kp_id}] 不存在。")
             except (PermissionError, ValueError) as e:
                 return ToolResult(ok=False, error=str(e))
             next_dt = datetime.datetime.fromtimestamp(rec["next_review_at"]).strftime("%Y-%m-%d %H:%M")
             return ToolResult(
                 ok=True,
                 output=(
-                    f"【SM-2 复习评分已记录】{rec['name']} ({rec['kp_id']})\n"
-                    f"- 质量分: {rec['quality']}/5 | 掌握度: {rec['prev_mastery']:.2f} -> {rec['new_mastery']:.2f}\n"
-                    f"- 下次复习间隔: {rec['interval_days']} 天后 ({next_dt}) | EF: {rec['ef']}"
+                    f"【SM-2 衰减重放评分已记录】{rec['name']} ({rec['kp_id']})\n"
+                    f"- 质量分: {rec['quality']}/5 | 节点稳健度: {rec['prev_mastery']:.2f} -> {rec['new_mastery']:.2f}\n"
+                    f"- 下次重放间隔: {rec['interval_days']} 天后 ({next_dt}) | EF: {rec['ef']}"
                 ),
                 metadata=rec,
             )
@@ -459,29 +476,31 @@ class ReviewTool(Tool):
 
         parts: list[str] = []
         if due_list:
-            parts.append(f"### 今日到期复习知识点 ({len(due_list)} 个):")
+            parts.append(f"### 当前到期需重放知识节点 ({len(due_list)} 个):")
             for d in due_list:
                 parts.append(
-                    f"- [{d['kp_id']}] {d['kp_name']} | 当前掌握度: {d['mastery']:.2f} | 复习轮次: {d['repetitions']}"
+                    f"- [{d['kp_id']}] {d['kp_name']} | 当前稳健度: {d['mastery']:.2f} | 连续重放轮次: {d['repetitions']}"
                 )
         else:
-            parts.append("### 今日到期复习知识点: 暂无到期项")
+            parts.append("### 当前到期需重放知识节点: 暂无到期项")
 
         if mistakes:
-            parts.append(f"\n### 未消灭错题本 ({len(mistakes)} 道):")
+            parts.append(f"\n### 未收敛失败任务集 ({len(mistakes)} 项):")
             for m in mistakes:
                 parts.append(
-                    f"- 错题ID [{m['id']}] (知识点: {m.get('kp_name')}, 错因: {m['error_type']}): {m.get('stem') or ''} -> 正确答案: {m.get('expected_answer') or ''}"
+                    f"- 失败记录ID [{m['id']}] (节点: {m.get('kp_name')}, 偏差类型: {m['error_type']}): {m.get('stem') or ''} -> 基准答案: {m.get('expected_answer') or ''}"
                 )
         else:
-            parts.append("\n### 未消灭错题本: 暂无错题")
+            parts.append("\n### 未收敛失败任务集: 暂无未收敛项")
 
         return ToolResult(ok=True, output="\n".join(parts))
 
 
 class ProgressTool(Tool):
+    """闭环状态遥测报告与优化流水线编排工具（闭环控制第 4 环）。"""
+
     name = "progress_tool"
-    description = "学情诊断与学习计划工具。支持 action='report'（查询掌握度与薄弱点报告）、action='create_plan'（创建学习计划）、action='list_plans'（查看学习计划）。"
+    description = "闭环状态遥测与优化流水线编排工具。支持 action='report'（查询节点稳健度与低分薄弱项遥测报告）、action='create_plan'（基于失败任务与薄弱节点编排优化执行流水线）、action='list_plans'（查看已编排的优化流水线列表）。"
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -490,12 +509,12 @@ class ProgressTool(Tool):
                 "enum": ["report", "create_plan", "list_plans"],
                 "description": "report / create_plan / list_plans",
             },
-            "goal": {"type": "string", "description": "学习目标（create_plan 时使用）"},
-            "deadline": {"type": "string", "description": "目标截止日期（可选）"},
+            "goal": {"type": "string", "description": "流水线优化目标（create_plan 时使用）"},
+            "deadline": {"type": "string", "description": "目标截止时间或里程碑（可选）"},
             "tasks": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "分步学习任务列表（create_plan 时使用）",
+                "description": "分步优化执行任务列表（create_plan 时使用；留空则自动根据失败任务集与低稳健度节点生成）",
             },
         },
         "required": ["action"],
@@ -508,16 +527,16 @@ class ProgressTool(Tool):
         action = arguments.get("action", "report")
 
         if action == "create_plan":
-            goal = (arguments.get("goal") or "系统化掌握课程薄弱知识点").strip()
+            goal = (arguments.get("goal") or "系统化收敛低稳健度知识节点与失败任务").strip()
             deadline = (arguments.get("deadline") or "").strip()
             raw_tasks = arguments.get("tasks") or []
             if not raw_tasks:
                 rep = await self.store.get_progress_report(context.user_id)
-                weak_names = [w["kp_name"] for w in rep["weakest_kps"][:3]] or ["核心概念梳理"]
+                weak_names = [w["kp_name"] for w in rep["weakest_kps"][:3]] or ["核心基础节点"]
                 raw_tasks = [
-                    f"第 1 阶段：精读教材并梳理【{'、'.join(weak_names)}】核心概念",
-                    f"第 2 阶段：完成针对性专项练习题并订正错题本（当前未消错题 {rep['unresolved_mistakes_count']} 道）",
-                    "第 3 阶段：按 SM-2 间隔复习计划完成到期巩固自测",
+                    f"阶段 1：基于 RAG 知识源核验并补齐【{'、'.join(weak_names)}】结构化节点定义",
+                    f"阶段 2：执行针对性基准验证测试并收敛未解决失败任务（当前待收敛 {rep['unresolved_mistakes_count']} 项）",
+                    "阶段 3：按 SM-2 衰减周期完成到期节点的回归重放与稳健度复核",
                 ]
             items = [{"step": idx + 1, "task": str(t), "done": False} for idx, t in enumerate(raw_tasks)]
             plan = await self.store.save_study_plan(
@@ -526,32 +545,32 @@ class ProgressTool(Tool):
             tasks_str = "\n".join(f"  {it['step']}. {it['task']}" for it in items)
             return ToolResult(
                 ok=True,
-                output=f"已创建学习计划 [{plan['id']}] 目标：{goal}\n{tasks_str}",
+                output=f"已编排优化执行流水线 [{plan['id']}] 目标：{goal}\n{tasks_str}",
                 metadata=plan,
             )
 
         if action == "list_plans":
             plans = await self.store.list_study_plans(context.user_id)
             if not plans:
-                return ToolResult(ok=True, output="当前暂无学习计划。")
+                return ToolResult(ok=True, output="当前暂无已编排的优化流水线。")
             lines = []
             for p in plans:
                 t_str = "; ".join(f"{it.get('step')}.{it.get('task')}" for it in p["items"])
-                lines.append(f"- [{p['id']}] 目标: {p['goal']} (截止: {p['deadline'] or '未设'}) -> {t_str}")
-            return ToolResult(ok=True, output="学习计划列表:\n" + "\n".join(lines))
+                lines.append(f"- [{p['id']}] 目标: {p['goal']} (里程碑: {p['deadline'] or '未设'}) -> {t_str}")
+            return ToolResult(ok=True, output="优化执行流水线列表:\n" + "\n".join(lines))
 
         rep = await self.store.get_progress_report(context.user_id)
         weak_lines = [
-            f"  • {w['kp_name']} ({w['kp_id']}): 掌握度 {w['mastery']:.2f} | EF={w['ef']:.2f} | 间隔={w['interval_days']}天"
+            f"  • {w['kp_name']} ({w['kp_id']}): 稳健度 {w['mastery']:.2f} | EF={w['ef']:.2f} | 重放间隔={w['interval_days']}天"
             for w in rep["weakest_kps"]
-        ] or ["  • 暂无知识点作答记录"]
+        ] or ["  • 暂无节点评估记录"]
         return ToolResult(
             ok=True,
             output=(
-                f"【学情诊断报告 (用户: {context.user_id})】\n"
-                f"- 累计作答: {rep['total_attempts']} 题 | 答对: {rep['correct_attempts']} 题 | 正确率: {rep['accuracy'] * 100:.1f}% | 平均分: {rep['avg_score']:.2f}\n"
-                f"- 今日待复习知识点: {rep['due_review_count']} 个 | 未解决错题: {rep['unresolved_mistakes_count']} 道\n"
-                f"- 薄弱知识点 Top-5:\n" + "\n".join(weak_lines)
+                f"【闭环状态遥测报告 (作用域用户: {context.user_id})】\n"
+                f"- 累计执行测试: {rep['total_attempts']} 次 | 裁决通过: {rep['correct_attempts']} 次 | 通过率: {rep['accuracy'] * 100:.1f}% | 平均得分: {rep['avg_score']:.2f}\n"
+                f"- 到期需重放节点: {rep['due_review_count']} 个 | 未收敛失败任务: {rep['unresolved_mistakes_count']} 项\n"
+                f"- 低稳健度薄弱节点 Top-5:\n" + "\n".join(weak_lines)
             ),
             metadata=rep,
         )

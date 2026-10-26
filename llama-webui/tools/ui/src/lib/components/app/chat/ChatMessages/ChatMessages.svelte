@@ -381,8 +381,8 @@
 
 			toast.success(
 				matched
-					? `已提取知识节点「${title}」，并匹配到教材出处 P.${eventPayload.pageStart}`
-					: `已提取知识节点「${title}」（未匹配到教材出处，仅保留对话锚点）`
+					? `已提取知识节点「${title}」，并匹配到文档出处 P.${eventPayload.pageStart}`
+					: `已提取知识节点「${title}」（未匹配到文档出处，仅保留对话锚点）`
 			);
 			toolbarVisible = false;
 			showAppendDropdown = false;
@@ -423,8 +423,8 @@
 
 			toast.success(
 				matched
-					? `已追加引用到节点「${targetNode.title}」，并匹配到教材出处 P.${attribution!.chunk!.page_start}`
-					: `已追加引用到节点「${targetNode.title}」（未匹配到教材出处）`
+					? `已追加引用到节点「${targetNode.title}」，并匹配到文档出处 P.${attribution!.chunk!.page_start}`
+					: `已追加引用到节点「${targetNode.title}」（未匹配到文档出处）`
 			);
 			toolbarVisible = false;
 			showAppendDropdown = false;

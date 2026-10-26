@@ -187,11 +187,11 @@ describe('Adversarial Challenge Suite M3: Text Selection, Extraction, Sanitizati
 	// =========================================================================
 	describe('Dimension 4: Extreme Boundaries & Stress Invariants', () => {
 		it('returns default fallback title for empty, whitespace, and symbol-only selections', () => {
-			expect(extractTitleCandidate('')).toBe('知识点提炼');
-			expect(extractTitleCandidate('    ')).toBe('知识点提炼');
-			expect(extractTitleCandidate('\n\t\r')).toBe('知识点提炼');
-			expect(extractTitleCandidate('---===***###')).toBe('知识点提炼');
-			expect(extractTitleCandidate('1. 、 - >')).toBe('知识点提炼');
+			expect(extractTitleCandidate('')).toBe('知识节点提炼');
+			expect(extractTitleCandidate('    ')).toBe('知识节点提炼');
+			expect(extractTitleCandidate('\n\t\r')).toBe('知识节点提炼');
+			expect(extractTitleCandidate('---===***###')).toBe('知识节点提炼');
+			expect(extractTitleCandidate('1. 、 - >')).toBe('知识节点提炼');
 		});
 
 		it('handles single-character and very short selections safely', () => {
@@ -225,7 +225,7 @@ describe('Adversarial Challenge Suite M3: Text Selection, Extraction, Sanitizati
 
 			expect(title).toBeTruthy();
 			expect(title.length).toBeLessThanOrEqual(40);
-			expect(prov.docTitle).toBe('参考教材');
+			expect(prov.docTitle).toBe('知识源文档');
 			expect(prov.pageStart).toBe(1);
 			expect(clean.length).toBeGreaterThanOrEqual(massiveText.length);
 			expect(elapsed).toBeLessThan(100); // Must process 25k chars in <100ms

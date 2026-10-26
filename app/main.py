@@ -31,8 +31,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     setup_logging(level=cfg.log_level)
 
     app = FastAPI(
-        title="Learning Agent Backend (Llama.cpp + RAG + MCP)",
-        description="辅助学习智能体后端服务：兼容 llama.cpp 原生 WebUI (/props, /v1/chat/completions, /mcp) + 学情记忆与 SM-2 间隔重复 + 知识图谱与教材 RAG",
+        title="General Agent Backend (Llama.cpp + RAG + MCP)",
+        description="通用智能体后端服务：兼容 llama.cpp 原生 WebUI (/props, /v1/chat/completions, /mcp) + 多层记忆与 SM-2 衰减重放闭环控制 + 知识图谱与文档溯源 RAG",
         version="0.3.0",
         lifespan=lifespan,
     )

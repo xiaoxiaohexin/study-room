@@ -3,7 +3,7 @@
 实测（llama-server b9010 + Gemma-4 E4B）：
 - `response_format={"type": "json_schema", ...}` 且关闭思考时，约 0.7s 返回合法 JSON；
 - 不加约束时模型常输出 ```json 代码块或结构不符的数组，不可靠。
-因此所有需要结构化结果的调用（意图分类、出题、主观题判分）都走这里。
+因此所有需要结构化结果的调用（意图分类、验证任务生成、开放式响应评估）都走这里。
 """
 
 from __future__ import annotations

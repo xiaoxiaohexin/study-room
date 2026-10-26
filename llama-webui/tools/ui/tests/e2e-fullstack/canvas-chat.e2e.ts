@@ -148,17 +148,17 @@ test('画布 ↔ 对话：划词建卡、锚点跳转、分支追问与分支切
 
 	const assistantMessages = page.locator('.chat-messages [data-message-role="assistant"]');
 	await expect(assistantMessages.first()).toBeVisible({ timeout: 30000 });
-	await expect(page.getByLabel('切换到上一个学习分支').first()).toBeVisible({
+	await expect(page.getByLabel('切换到上一个对话分支').first()).toBeVisible({
 		timeout: 30000
 	});
 
 	// 切换到另一个分支，原分支消息仍在
-	await jsClick(page.getByLabel('切换到上一个学习分支').first());
+	await jsClick(page.getByLabel('切换到上一个对话分支').first());
 	await expect(page.getByText(/分支 1\/2/).first()).toBeVisible({ timeout: 15000 });
 	await expect(assistantMessages.first()).toBeVisible();
 
 	// 切回新分支
-	await jsClick(page.getByLabel('切换到下一个学习分支').first());
+	await jsClick(page.getByLabel('切换到下一个对话分支').first());
 	await expect(page.getByText(/分支 2\/2/).first()).toBeVisible({ timeout: 15000 });
 });
 
@@ -217,7 +217,7 @@ test('真实教材页码溯源：后端文档注册 → 画布补齐 → 渲染�
 	await expect(badge).toBeVisible({ timeout: 15000 });
 	await badge.click();
 
-	const dialog = page.getByRole('dialog', { name: '教材出处预览' });
+	const dialog = page.getByRole('dialog', { name: '文档溯源预览' });
 	await expect(dialog).toBeVisible({ timeout: 10000 });
 	await expect(dialog.locator('img')).toBeVisible({ timeout: 30000 });
 	await expect(dialog.getByText(/pdf\.js 渲染/)).toBeVisible({ timeout: 10000 });

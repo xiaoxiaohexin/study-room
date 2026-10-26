@@ -295,8 +295,8 @@ describe('Feature 09: Text Selection Parsing & Candidate Extraction', () => {
 		expect(clause).toBe('交叉熵损失函数衡量两个概率分布之间的距离');
 
 		// Fallback
-		expect(extractTitleCandidate('')).toBe('知识点提炼');
-		expect(extractTitleCandidate('   ')).toBe('知识点提炼');
+		expect(extractTitleCandidate('')).toBe('知识节点提炼');
+		expect(extractTitleCandidate('   ')).toBe('知识节点提炼');
 	});
 
 	it('preserves raw LaTeX mathematical notations during title extraction', () => {
@@ -332,7 +332,7 @@ describe('Feature 09: Text Selection Parsing & Candidate Extraction', () => {
 
 		// Fallback
 		const res4 = extractProvenanceInfo('这是纯文本问答，没有教材引用');
-		expect(res4.docTitle).toBe('参考教材');
+		expect(res4.docTitle).toBe('知识源文档');
 		expect(res4.pageStart).toBe(1);
 	});
 

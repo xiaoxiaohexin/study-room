@@ -34,8 +34,8 @@ _OCR_RENDER_SCALE = 2.0
 _OCR_MAX_TOKENS = 4000
 _OCR_PAGE_TIMEOUT = 600.0
 _OCR_PROMPT = (
-    "请将这一页教科书完整转写为 Markdown：保留数学公式的 LaTeX、标题层级、正文、"
-    "例题与习题编号。不要输出图片链接或占位符，不要添加任何解释。"
+    "请将这一页文档完整转写为 Markdown：保留数学公式的 LaTeX、标题层级、正文、"
+    "条目与段落编号。不要输出图片链接或占位符，不要添加任何解释。"
 )
 
 
@@ -125,7 +125,7 @@ class DocumentLoader:
             log.warning("pdf_has_zero_pages", path=str(file_path))
             return ""
 
-        # 逐页检测：只要个别页面没有文本层（教材里穿插的扫描插图页/习题页），
+        # 逐页检测：只要个别页面没有文本层（文档里穿插的扫描插图页/附录页），
         # 就单独 OCR 这些页，而不是等整本书都缺文本才触发。
         missing = [
             i for i, t in enumerate(page_texts, start=1) if len(t.strip()) < _MIN_PAGE_TEXT_CHARS

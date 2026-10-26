@@ -175,7 +175,7 @@
 			{
 				color: 'slate',
 				content:
-					'欢迎来到 **AI 无限节点白板画布**！\n\n- **提问自动上墙**：在底部输入框发送消息，每一轮对话与 `<think>` 思考过程都会自动生成关联卡片。\n- **图片/知识/记忆一体化**：上传的题目图片会整齐对齐展示在对话节点卡片内（也可一键移至节点旁），并支持一键关联本地 **RAG 知识库** 与 **SM-2 记忆闪卡**。',
+					'欢迎来到 **AI 无限节点白板画布**！\n\n- **提问自动上墙**：在底部输入框发送消息，每一轮对话与 `<think>` 思考过程都会自动生成关联卡片。\n- **图片/知识/记忆一体化**：上传的图表图片会整齐对齐展示在对话节点卡片内（也可一键移至节点旁），并支持一键关联本地 **RAG 知识库** 与 **SM-2 衰减重放卡**。',
 				id: 'hub-welcome',
 				kind: 'hub',
 				title: '✨ 你好，有什么可以帮你？（AI 知识画布中心）',
@@ -199,16 +199,16 @@
 			},
 			{
 				backContent:
-					'SM-2 算法根据你的评分（0~5）动态更新：\n- **易度因子 (EF)**：$EF\' = EF + (0.1 - (5-q)(0.08 + (5-q)0.02))$\n- **复习间隔 (Interval)**：掌握越好，下次复习间隔呈指数级拉长。',
+					'SM-2 衰减调度算法根据你的质量评分（0~5）动态更新：\n- **易度因子 (EF)**：$EF\' = EF + (0.1 - (5-q)(0.08 + (5-q)0.02))$\n- **重放间隔 (Interval)**：稳健度越高，下次重放间隔呈指数级拉长。',
 				color: 'violet',
 				content:
-					'什么是 **SM-2 间隔重复算法**？点击下方“翻转看答案”查看背面解析，或点击“拉取待复习”从后端同步今日复习题。',
+					'什么是 **SM-2 衰减重放算法**？点击下方“翻转看解析”查看背面要点，或点击“拉取待重放”从后端同步到期节点。',
 				flipped: false,
 				id: 'starter-flashcard',
 				kind: 'flashcard',
 				sm2Easiness: 2.5,
 				sm2Interval: 1,
-				title: '🧠 SM-2 艾宾浩斯复习闪卡',
+				title: '🧠 SM-2 衰减重放评估卡',
 				width: 360,
 				x: 880,
 				y: 40
@@ -216,7 +216,7 @@
 			{
 				color: 'amber',
 				content:
-					'在此随时记录灵感、实验结论或课堂重点。\n点击右上角 **保存** 即可直接调用后端 `note_tool` 落盘为本地 Markdown 笔记。',
+					'在此随时记录灵感、实验结论或关键摘要。\n点击右上角 **保存** 即可直接调用后端 `note_tool` 落盘为本地 Markdown 笔记。',
 				id: 'starter-note',
 				kind: 'note',
 				title: '📝 随手便签笔记',
@@ -296,7 +296,7 @@
 		if (!targetLeaf) return;
 		await conversationsStore.navigateToSibling(targetLeaf);
 		await refreshAllConversationMessages();
-		toast.success(`已切换到学习分支 ${nextIndex + 1}/${info.totalSiblings}`);
+		toast.success(`已切换到对话分支 ${nextIndex + 1}/${info.totalSiblings}`);
 	}
 
 	$effect(() => {
@@ -467,7 +467,7 @@
 				if (item.type === AttachmentType.IMAGE && item.base64Url) {
 					pushUnique({
 						id: `${turn.id}-${prefix}-img-${idx}`,
-						name: item.name || `题目图片 ${items.length + 1}`,
+						name: item.name || `输入图片 ${items.length + 1}`,
 						source: 'message',
 						url: item.base64Url
 					});
@@ -696,7 +696,7 @@
 			const sideNode: CustomCanvasNode = {
 				activeImageIndex: assoc.activeImageIndex ?? 0,
 				color: 'rose',
-				content: `与 对话节点 #${turn.turnIndex} 关联的题目/参考图片（共 ${imagePayload.length} 张）`,
+				content: `与 对话节点 #${turn.turnIndex} 关联的参考图片（共 ${imagePayload.length} 张）`,
 				id: newId,
 				images: imagePayload,
 				kind: 'image',
@@ -713,7 +713,7 @@
 				{
 					from: newId,
 					id: `edge-img-${turn.id}-${Date.now()}`,
-					label: '题目配图',
+					label: '关联配图',
 					to: turn.id
 				}
 			];
@@ -835,8 +835,8 @@
 	// Associate Memory / SM-2 Flashcard directly with a Conversation Turn Node
 	function associateMemoryWithTurn(turn: ChatTurnNode, placeBeside = false) {
 		const assoc = ensureTurnAssoc(turn.id);
-		const front = (turn.userMessage?.content || `对话 #${turn.turnIndex} 核心考点`).slice(0, 200);
-		const back = (turn.assistantMessage?.content || '待整理要点与错题解析').slice(0, 500);
+		const front = (turn.userMessage?.content || `对话 #${turn.turnIndex} 核心节点`).slice(0, 200);
+		const back = (turn.assistantMessage?.content || '待整理要点与结构化解析').slice(0, 500);
 
 		if (placeBeside) {
 			addFlashcardNode(front, back, turn.id);
@@ -896,7 +896,7 @@
 			parts.push(`原问题：${turn.userMessage.content}`);
 		}
 		if (imgs.length > 0) {
-			parts.push(`已关联题目/参考图片：${imgs.map((i) => i.name).join('、')}`);
+			parts.push(`已关联参考图片：${imgs.map((i) => i.name).join('、')}`);
 		}
 		if (assoc?.ragItems && assoc.ragItems.length > 0) {
 			parts.push(
@@ -905,7 +905,7 @@
 		}
 		if (assoc?.memoryItems && assoc.memoryItems.length > 0) {
 			parts.push(
-				`关联记忆考点：${assoc.memoryItems.map((m) => m.front).join('；')}`
+				`关联记忆节点：${assoc.memoryItems.map((m) => m.front).join('；')}`
 			);
 		}
 		for (const node of connected) {
@@ -1644,7 +1644,7 @@
 			}
 		];
 		persistCanvasState();
-		toast.success(`已生成复习闪卡并与「${node.title}」关联`);
+		toast.success(`已生成重放评估卡并与「${node.title}」关联`);
 	}
 
 	onMount(() => {
@@ -1946,7 +1946,7 @@
 		injectIntoChat(prompt);
 		pendingBranchSourceNodeId = node.id;
 		toast.success(
-			`已锚定至「${node.title}」所处对话分支（原分支完整保留），发送提问后将自动生成独立学习分支！`
+			`已锚定至「${node.title}」所处对话分支（原分支完整保留），发送提问后将自动生成独立对话分支！`
 		);
 	}
 
@@ -2003,7 +2003,7 @@
 		const newId = `note-${Date.now()}`;
 		const newNode: CustomCanvasNode = {
 			color: 'amber',
-			content: prefillContent || '双击或在此直接输入你的想法、摘录或课堂笔记…',
+			content: prefillContent || '双击或在此直接输入你的想法、摘录或结构化笔记…',
 			id: newId,
 			kind: 'note',
 			linkedTurnId: linkFromId,
@@ -2047,12 +2047,12 @@
 		const newNode: CustomCanvasNode = {
 			activeImageIndex: 0,
 			color: 'rose',
-			content: '点击下方“+ 上传图片”添加题目或参考图，并从右侧圆点连线到任意对话节点。',
+			content: '点击下方“+ 上传图片”添加图表或参考图，并从右侧圆点连线到任意对话节点。',
 			id: newId,
 			images: seedImages,
 			kind: 'image',
 			linkedTurnId: linkFromId,
-			title: '🖼️ 题目与参考图片卡',
+			title: '🖼️ 视觉与参考图片卡',
 			width: 350,
 			x: Math.round(center.x - 140),
 			y: Math.round(center.y - 80)
@@ -2148,7 +2148,7 @@
 		if (!node) return;
 
 		if (node.kind === 'knowledge' && node.knowledgePointId) {
-			if (!confirm(`确定删除知识节点「${node.title}」吗？后端知识点与复习记录会一并删除。`)) {
+			if (!confirm(`确定删除知识节点「${node.title}」吗？后端知识节点与关联状态记录将一并级联删除。`)) {
 				return;
 			}
 			const courseId = node.courseId || getActiveCourseId();
@@ -2324,13 +2324,13 @@
 			if (text && !text.includes('暂无到期')) {
 				customNodes[idx].content = text;
 				customNodes[idx].flipped = false;
-				toast.success('已从后端拉取待复习闪卡');
+				toast.success('已从后端拉取待重放评估卡');
 			} else {
 				toast.info('当前暂无到期闪卡，已为你保留示例闪卡');
 			}
 		} catch (err) {
 			toast.error(
-				`同步后端复习卡片失败：${err instanceof Error ? err.message : String(err)}`
+				`同步后端重放卡片失败：${err instanceof Error ? err.message : String(err)}`
 			);
 		} finally {
 			savingNodeId = null;
@@ -2358,7 +2358,7 @@
 		persistCanvasState();
 
 		if (!node.cardId) {
-			toast.success(`SM-2 评分已记录（评分 ${quality} → 下次复习间隔 ${nextInterval} 天，EF=${nextEf}）`);
+			toast.success(`SM-2 评分已记录（评分 ${quality} → 下次重放间隔 ${nextInterval} 天，EF=${nextEf}）`);
 
 			return;
 		}
@@ -2373,7 +2373,7 @@
 			if (result.isError) throw new Error(result.content);
 
 			toast.success(
-				`SM-2 评分已记录并同步后端（评分 ${quality} → 下次复习间隔 ${nextInterval} 天，EF=${nextEf}）`
+				`SM-2 评分已记录并同步后端（评分 ${quality} → 下次重放间隔 ${nextInterval} 天，EF=${nextEf}）`
 			);
 		} catch (err) {
 			toast.warning(
@@ -2906,7 +2906,7 @@
 							<div class="mt-1 flex flex-wrap gap-1.5 border-t border-border/40 pt-2.5">
 								<Button
 									class="h-7 gap-1 text-xs"
-									onclick={() => injectIntoChat('请帮我总结当前知识库中的核心概念，并列出复习大纲')}
+									onclick={() => injectIntoChat('请帮我总结当前知识库中的核心概念，并列出结构化大纲')}
 									size="sm"
 									variant="secondary"
 								>
@@ -3138,7 +3138,7 @@
 									variant="ghost"
 								>
 									<RefreshCw class="h-3 w-3 {savingNodeId === node.id ? 'animate-spin' : ''}" />
-									<span>拉取待复习</span>
+									<span>拉取待重放</span>
 								</Button>
 							</div>
 
@@ -3223,17 +3223,17 @@
 												provenanceNavigation.openTextbookPreview({
 													docId: currentAnchor.docId,
 													namespace: getActiveRagNamespace(),
-													docTitle: currentAnchor.docTitle || '参考教材',
+													docTitle: currentAnchor.docTitle || '知识源文档',
 													pageStart: currentAnchor.pageStart || 1,
 													pageEnd: currentAnchor.pageEnd,
 													quoteSnippet: currentAnchor.quoteSnippet
 												});
 											}}
-											title="点击在内嵌预览中查看教材原文对应物理页"
+											title="点击在内嵌预览中查看文档原文对应物理页"
 										>
 											<BookOpen class="h-3 w-3 text-emerald-500" />
 											<span>
-												{currentAnchor.docTitle || '教材'} P.{currentAnchor.pageStart ?? 1}{currentAnchor.pageEnd && currentAnchor.pageEnd !== currentAnchor.pageStart ? `-${currentAnchor.pageEnd}` : ''}
+												{currentAnchor.docTitle || '文档'} P.{currentAnchor.pageStart ?? 1}{currentAnchor.pageEnd && currentAnchor.pageEnd !== currentAnchor.pageStart ? `-${currentAnchor.pageEnd}` : ''}
 											</span>
 										</button>
 									{/if}
@@ -3261,7 +3261,7 @@
 
 								<div class="space-y-1">
 									<div class="flex items-center justify-between">
-										<span class="text-[10px] font-medium text-muted-foreground">学习笔记与思考解析 (Markdown)</span>
+										<span class="text-[10px] font-medium text-muted-foreground">节点批注与结构化解析 (Markdown)</span>
 										<span class="text-[10px] text-muted-foreground/60">失焦自动生成新版本</span>
 									</div>
 									<textarea
@@ -3269,15 +3269,15 @@
 										rows="3"
 										class="w-full resize-y rounded-lg border border-border/60 bg-background/60 p-2 text-xs leading-relaxed text-foreground placeholder:text-muted-foreground/50 focus:border-primary/50 focus:outline-hidden"
 										onblur={() => handleKnowledgeNodeBlur(node)}
-										placeholder="在此记录推导过程、易错点或补充示例…"
+										placeholder="在此记录推导过程、关键约束或补充示例…"
 									></textarea>
 								</div>
 
 								<!-- Difficulty & Mastery Bar -->
 								<div class="flex items-center justify-between text-[11px] pt-1.5 border-t border-border/40">
 									<div class="flex items-center gap-1">
-										<span class="text-[10px] text-muted-foreground">难度:</span>
-										{#each [{ label: '基础', val: 0.3 }, { label: '中等', val: 0.5 }, { label: '难点', val: 0.8 }] as d}
+										<span class="text-[10px] text-muted-foreground">复杂度:</span>
+										{#each [{ label: '低', val: 0.3 }, { label: '中', val: 0.5 }, { label: '高', val: 0.8 }] as d}
 											<button
 												type="button"
 												class="rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors cursor-pointer {(node.difficulty ?? 0.5) === d.val ? 'bg-primary text-primary-foreground font-semibold' : 'bg-muted text-muted-foreground hover:bg-accent'}"
@@ -3292,7 +3292,7 @@
 									</div>
 
 									<div class="flex items-center gap-1.5">
-										<span class="text-[10px] text-muted-foreground">掌握度: {Math.round((node.mastery ?? 0.3) * 100)}%</span>
+										<span class="text-[10px] text-muted-foreground">稳健度: {Math.round((node.mastery ?? 0.3) * 100)}%</span>
 										<div class="h-1.5 w-12 rounded-full bg-muted overflow-hidden">
 											<div
 												class="h-full bg-emerald-500 transition-all duration-300"
@@ -3323,7 +3323,7 @@
 										title="将此知识点转化为记忆闪卡"
 									>
 										<Brain class="h-3 w-3 text-violet-500" />
-										<span>转为复习闪卡</span>
+										<span>转为重放闪卡</span>
 									</Button>
 
 									<Button
@@ -3486,10 +3486,10 @@
 							{#if branchInfo}
 								<span
 									class="inline-flex shrink-0 items-center gap-0.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-1 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300"
-									title="该消息存在多个学习分支，点击切换（原分支完整保留）"
+									title="该消息存在多个对话分支，点击切换（原分支完整保留）"
 								>
 									<button
-										aria-label="切换到上一个学习分支"
+										aria-label="切换到上一个对话分支"
 										class="rounded px-0.5 hover:bg-emerald-500/20"
 										onclick={(e) => {
 											e.stopPropagation();
@@ -3501,7 +3501,7 @@
 									</button>
 									<span>分支 {branchInfo.current}/{branchInfo.total}</span>
 									<button
-										aria-label="切换到下一个学习分支"
+										aria-label="切换到下一个对话分支"
 										class="rounded px-0.5 hover:bg-emerald-500/20"
 										onclick={(e) => {
 											e.stopPropagation();
@@ -3527,7 +3527,7 @@
 										triggerTurnImageUpload(turn.id);
 									}
 								}}
-								title="上传题目图片或展开卡片内的配图展台"
+								title="上传参考图片或展开卡片内的配图展台"
 								type="button"
 							>
 								{turnImages.length > 0 && placement !== 'top'
@@ -3601,7 +3601,7 @@
 										class="inline-flex items-center gap-1 rounded-md border border-border/70 bg-background px-1.5 py-0.5 text-[10px] font-medium text-foreground"
 									>
 										<ImageIcon class="h-3 w-3 text-primary" />
-										<span>关联题目/图片 ({activeImgIdx + 1}/{turnImages.length})</span>
+										<span>关联参考图片 ({activeImgIdx + 1}/{turnImages.length})</span>
 									</span>
 									<span class="truncate text-[11px] text-muted-foreground" title={currentTurnImg.name}>
 										{currentTurnImg.name}
@@ -3679,7 +3679,7 @@
 										<span
 											class="pointer-events-none absolute right-2 bottom-2 rounded-md bg-background/90 px-2 py-0.5 text-[10px] font-medium text-foreground opacity-0 shadow-xs backdrop-blur-xs transition-opacity group-hover/img:opacity-100"
 										>
-											🔍 点击放大看题
+											🔍 点击放大查看
 										</span>
 									</button>
 
@@ -3780,7 +3780,7 @@
 											type="button"
 										>
 											<ImageIcon class="h-3 w-3" />
-											<span>关联会话题目图 ({allConversationImages.length}张)</span>
+											<span>关联会话图片 ({allConversationImages.length}张)</span>
 										</button>
 									{/if}
 
@@ -3958,7 +3958,7 @@
 										<div class="rounded-lg border border-violet-500/20 bg-background/85 p-2 space-y-1.5">
 											<div class="flex items-center justify-between text-[10px] text-muted-foreground">
 												<span class="font-semibold">
-													{mem.flipped ? '🔓 背面解析' : '❓ 正面考点'}
+													{mem.flipped ? '🔓 背面解析' : '❓ 正面要点'}
 												</span>
 												<span class="font-mono">
 													间隔 {mem.interval}d · EF {mem.easiness}

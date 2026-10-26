@@ -1,4 +1,9 @@
-"""学习领域数据存储（LearningStore）：管理课程、知识点、题目、作答、掌握度（SM-2）、错题本与学习计划。"""
+"""闭环控制状态存储（LearningStore）：管理知识域、知识节点、验证任务、执行记录、节点稳健度（SM-2）、失败任务集与优化流水线计划。
+
+核心架构说明：
+- 闭环控制逻辑：一个**“基于 RAG 检索知识源生成测试 -> 自动化混合裁决评估 -> 基于记忆衰减（SM-2）计算下一次重放时间 -> 自动收集失败任务并编排优化流水线”**的闭环控制系统。
+- 删数据的逻辑：Agent 端严禁硬删除，业务端采用软状态标记（Soft Resolve），仅在底层维护受用户作用域隔离的级联物理删除（参见 `delete_knowledge_point`）。
+"""
 
 from __future__ import annotations
 
@@ -22,7 +27,7 @@ class LearningStore:
         self.sqlite = sqlite
         self.graph_store = graph_store
 
-    # ==================== 课程管理 ====================
+    # ==================== 知识域管理 ====================
     async def create_course(
         self,
         user_id: str,
@@ -72,7 +77,7 @@ class LearningStore:
             return {
                 "id": "default",
                 "user_id": user_id,
-                "name": "默认课程",
+                "name": "默认知识域",
                 "namespace": "default",
                 "description": "",
                 "virtual": True,
@@ -127,7 +132,7 @@ class LearningStore:
             raise PermissionError(f"Knowledge point '{kp_id}' belongs to another user")
         return dict(row)
 
-    # ==================== 知识点管理 ====================
+    # ==================== 知识节点管理 ====================
     async def upsert_knowledge_point(
         self,
         course_id: str,
@@ -777,7 +782,7 @@ class LearningStore:
     async def delete_knowledge_point(
         self, kp_id: str, *, user_id: str = "default_user"
     ) -> bool:
-        """Delete a knowledge point plus its relations, prerequisite links and mastery rows."""
+        """底层受用户作用域隔离的级联物理删除：清理知识节点及其关联边、前置依赖与 SM-2 稳健度记录。"""
         cur = await self.sqlite.conn.execute(
             "SELECT id FROM knowledge_points WHERE id = ? AND user_id = ?", (kp_id, user_id)
         )
@@ -799,7 +804,7 @@ class LearningStore:
         log.info("knowledge_point_deleted", kp_id=kp_id, user_id=user_id)
         return True
 
-    # ==================== 题库与出题 ====================
+    # ==================== 验证任务库与生成 ====================
     async def add_question(
         self,
         kp_id: str,
@@ -865,7 +870,7 @@ class LearningStore:
         return d
 
     async def get_latest_unanswered_question(self, user_id: str) -> dict[str, Any] | None:
-        """获取该用户最近生成、且尚未作答的一道题（用于会话内直接作答自动关联）。"""
+        """获取该用户最近生成、且尚未执行评估的验证任务（用于会话内直接提交响应自动关联）。"""
         cur = await self.sqlite.conn.execute(
             """
             SELECT q.* FROM questions q
@@ -884,7 +889,7 @@ class LearningStore:
         d["options"] = json.loads(d.pop("options_json", "[]") or "[]")
         return d
 
-    # ==================== 作答判分、掌握度与 SM-2 更新 ====================
+    # ==================== 混合裁决、节点稳健度与 SM-2 衰减更新 ====================
     async def record_attempt_and_update_mastery(
         self,
         user_id: str,
@@ -899,7 +904,7 @@ class LearningStore:
     ) -> dict[str, Any]:
         q = await self.get_question(question_id, user_id=user_id)
         if not q:
-            # 判分链路强制校验题目归属：绝不允许用他人生成的题目污染掌握度/错题本。
+            # 裁决链路强制校验任务归属：绝不允许跨用户任务污染节点稳健度与失败任务集。
             raise ValueError(f"Question '{question_id}' does not exist for user '{user_id}'.")
         kp_id = q["kp_id"]
         difficulty = float(q["difficulty"])
@@ -925,7 +930,7 @@ class LearningStore:
             ),
         )
 
-        # 读取现有掌握度与 SM-2 状态
+        # 读取现有节点稳健度与 SM-2 状态
         cur = await self.sqlite.conn.execute(
             "SELECT * FROM mastery WHERE user_id = ? AND kp_id = ?",
             (user_id, kp_id),
@@ -955,7 +960,7 @@ class LearningStore:
             (user_id, kp_id, new_mastery, sm2.ef, sm2.interval_days, sm2.repetitions, sm2.next_review_at, now),
         )
 
-        # 答错自动记入错题本
+        # 评估未达标自动记入失败任务集（后续仅允许通过 resolve_mistake 软状态标记收敛）
         mistake_id = None
         if not is_correct or score < 0.6:
             mistake_id = f"mis_{uuid.uuid4().hex[:10]}"
@@ -981,7 +986,7 @@ class LearningStore:
             "mistake_id": mistake_id,
         }
 
-    # ==================== 复习与错题本 ====================
+    # ==================== SM-2 衰减重放与失败任务集 ====================
     async def get_due_reviews(self, user_id: str, now: float | None = None, limit: int = 10) -> list[dict[str, Any]]:
         ts = now if now is not None else time.time()
         cur = await self.sqlite.conn.execute(
@@ -1001,7 +1006,7 @@ class LearningStore:
     async def review_knowledge_point(
         self, kp_id: str, quality: int, *, user_id: str = "default_user"
     ) -> dict[str, Any]:
-        """按 SM-2 质量分推进某个知识点的复习排期（闪卡自评，不产生作答/错题记录）。"""
+        """按 SM-2 质量分推进某个知识节点的重放排期（自评推进，不产生测试记录或失败任务）。"""
         kp = await self.get_knowledge_point(kp_id, user_id=user_id)
         if not kp:
             raise KeyError(f"Knowledge point '{kp_id}' not found")
@@ -1084,7 +1089,7 @@ class LearningStore:
         await self.sqlite.conn.commit()
         return cur.rowcount > 0
 
-    # ==================== 学习进度与画像 ====================
+    # ==================== 系统状态遥测与画像 ====================
     async def get_progress_report(self, user_id: str) -> dict[str, Any]:
         cur_m = await self.sqlite.conn.execute(
             """
@@ -1125,32 +1130,32 @@ class LearningStore:
         }
 
     async def build_learner_profile_text(self, user_id: str) -> str:
-        """为 GSSC ContextBuilder 构建简洁的学习者画像文本。"""
+        """为 GSSC ContextBuilder 构建简洁的系统状态遥测与节点稳健度画像文本。"""
         report = await self.get_progress_report(user_id)
         pending_q = await self.get_latest_unanswered_question(user_id)
 
         lines: list[str] = []
         if report["total_attempts"] > 0:
             lines.append(
-                f"- 累计作答: {report['total_attempts']} 题 | 正确率: {report['accuracy'] * 100:.1f}% | 待复习知识点: {report['due_review_count']} 个 | 未消灭错题: {report['unresolved_mistakes_count']} 道"
+                f"- 累计执行测试: {report['total_attempts']} 次 | 通过率: {report['accuracy'] * 100:.1f}% | 到期需重放节点: {report['due_review_count']} 个 | 未收敛失败任务: {report['unresolved_mistakes_count']} 项"
             )
         if report["weakest_kps"]:
-            weak_str = "、".join(f"{w['kp_name']}(掌握度:{w['mastery']:.2f})" for w in report["weakest_kps"][:3])
-            lines.append(f"- 当前薄弱知识点: {weak_str}")
+            weak_str = "、".join(f"{w['kp_name']}(稳健度:{w['mastery']:.2f})" for w in report["weakest_kps"][:3])
+            lines.append(f"- 当前低稳健度薄弱节点: {weak_str}")
         if report["recent_mistakes"]:
             mis_str = "；".join(
                 f"[{m['error_type']}] {m.get('kp_name', '')}: {(m.get('stem') or '')[:40]}"
                 for m in report["recent_mistakes"][:2]
             )
-            lines.append(f"- 近期典型错题: {mis_str}")
+            lines.append(f"- 近期未收敛失败任务: {mis_str}")
         if pending_q:
             opts = f" 选项: {pending_q['options']}" if pending_q.get("options") else ""
             lines.append(
-                f"- 当前待作答题目 (question_id={pending_q['id']}, 类型={pending_q['type']}): {pending_q['stem']}{opts}"
+                f"- 当前待评估验证任务 (question_id={pending_q['id']}, 类型={pending_q['type']}): {pending_q['stem']}{opts}"
             )
         return "\n".join(lines)
 
-    # ==================== 学习计划 ====================
+    # ==================== 优化执行流水线计划 ====================
     async def save_study_plan(
         self,
         user_id: str,

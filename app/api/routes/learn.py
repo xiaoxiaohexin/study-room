@@ -1,4 +1,4 @@
-"""学习领域业务路由（Courses / KnowledgePoints / Quiz / Grade / Review / Progress / Plans）。"""
+"""闭环控制与知识图谱路由（Courses / KnowledgePoints / Quiz / Grade / Review / Progress / Plans）。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from app.observability.logging import get_logger
 from app.tools.base import ToolContext
 
 log = get_logger(__name__)
-router = APIRouter(prefix="/api", tags=["Learning"])
+router = APIRouter(prefix="/api", tags=["Closed-Loop & Knowledge"])
 
 
 class CourseCreateRequest(BaseModel):
@@ -24,7 +24,7 @@ class CourseCreateRequest(BaseModel):
 
 
 class KnowledgeProvenance(BaseModel):
-    """三方溯源锚点数据结构（对话 ↔ 知识节点 ↔ 教材出处与物理页码）。"""
+    """三方溯源锚点数据结构（对话 ↔ 知识节点 ↔ 知识源文档出处与物理页码）。"""
     message_id: str | None = None
     turn_index: int | None = None
     doc_title: str | None = None
@@ -91,7 +91,7 @@ async def create_course(
     req: CourseCreateRequest,
     container: AppContainer = Depends(get_container),
 ):
-    """创建新课程或学科。"""
+    """创建新知识域（作用域容器）。"""
     course = await container.learning_store.create_course(
         user_id=req.user_id,
         name=req.name,
@@ -106,7 +106,7 @@ async def list_courses(
     user_id: str,
     container: AppContainer = Depends(get_container),
 ):
-    """获取指定用户的全部课程列表。"""
+    """获取指定用户的全部知识域列表。"""
     courses = await container.learning_store.list_courses(user_id=user_id)
     return {"user_id": user_id, "count": len(courses), "courses": courses}
 
@@ -118,7 +118,7 @@ async def add_knowledge_point(
     user_id: str = Depends(get_user_id),
     container: AppContainer = Depends(get_container),
 ):
-    """向指定课程新增或更新结构化知识点及前置依赖。"""
+    """向指定知识域新增或更新结构化知识节点及前置依赖。"""
     effective_user = (req.user_id or user_id or "default_user").strip() or "default_user"
     try:
         kp = await container.learning_store.upsert_knowledge_point(
@@ -168,7 +168,7 @@ async def list_knowledge_points(
     user_id: str = Depends(get_user_id),
     container: AppContainer = Depends(get_container),
 ):
-    """获取课程下的知识点列表（严格按调用用户过滤）。"""
+    """获取知识域下的知识节点列表（严格按调用用户过滤）。"""
     cid = None if course_id == "all" else course_id
     kps = await container.learning_store.list_knowledge_points(course_id=cid, user_id=user_id)
     return {
@@ -196,7 +196,7 @@ async def add_knowledge_relation(
     user_id: str = Depends(get_user_id),
     container: AppContainer = Depends(get_container),
 ):
-    """向指定课程新增知识点间的强类型语义关系。"""
+    """向指定知识域新增知识节点间的强类型语义关系。"""
     try:
         rel = await container.learning_store.upsert_relation(
             src_id=req.src_id,
@@ -236,7 +236,7 @@ async def get_knowledge_relations(
     user_id: str = Depends(get_user_id),
     container: AppContainer = Depends(get_container),
 ):
-    """获取指定知识点的全部入边与出边语义关联。"""
+    """获取指定知识节点的全部入边与出边语义关联。"""
     relations = await container.learning_store.get_relations(kp_id=kp_id, user_id=user_id)
     return {
         "status": "ok",
@@ -265,7 +265,7 @@ async def list_course_relations(
     user_id: str = Depends(get_user_id),
     container: AppContainer = Depends(get_container),
 ):
-    """获取课程下所有语义关系边。"""
+    """获取知识域下所有语义关系边。"""
     cid = None if course_id == "all" else course_id
     relations = await container.learning_store.list_course_relations(
         course_id=cid, rel_type=rel_type, user_id=user_id
@@ -299,7 +299,7 @@ async def delete_knowledge_relation(
     user_id: str = Depends(get_user_id),
     container: AppContainer = Depends(get_container),
 ):
-    """删除指定知识点之间的语义连线。"""
+    """删除指定知识节点之间的语义连线。"""
     deleted = await container.learning_store.delete_relation(
         src_id_or_id=src_id,
         rel_type=rel_type,
@@ -334,7 +334,7 @@ async def delete_knowledge_point_route(
     user_id: str = Depends(get_user_id),
     container: AppContainer = Depends(get_container),
 ):
-    """删除知识点并级联清理关系、前置依赖与掌握度记录。"""
+    """底层受用户作用域隔离的级联物理删除：清理知识节点及其关联关系、前置依赖与 SM-2 稳健度记录。"""
     try:
         deleted = await container.learning_store.delete_knowledge_point(kp_id, user_id=user_id)
     except PermissionError as e:
@@ -363,7 +363,7 @@ async def rollback_knowledge_point(
     user_id: str = Depends(get_user_id),
     container: AppContainer = Depends(get_container),
 ):
-    """非破坏性回滚知识点内容至指定版本快照。"""
+    """非破坏性回滚知识节点内容至指定版本快照。"""
     try:
         kp = await container.learning_store.rollback_knowledge_point(
             kp_id=kp_id,
@@ -405,7 +405,7 @@ async def get_knowledge_revisions(
     user_id: str = Depends(get_user_id),
     container: AppContainer = Depends(get_container),
 ):
-    """获取知识点的历史版本时间轴列表。"""
+    """获取知识节点的历史版本时间轴列表。"""
     kp = await container.learning_store.get_knowledge_point(
         kp_id, course_id=course_id, user_id=user_id
     )
@@ -439,7 +439,7 @@ async def generate_quiz(
     req: QuizGenerateRequest,
     container: AppContainer = Depends(get_container),
 ):
-    """生成一道结构化测验题并持久化到题库。"""
+    """基于 RAG 知识源生成一道结构化验证任务并持久化到任务库。"""
     quiz_tool = container.tool_registry.get("quiz_tool")
     if not quiz_tool:
         raise HTTPException(status_code=500, detail="quiz_tool not registered")
@@ -489,7 +489,7 @@ async def grade_quiz_answer(
     req: QuizAnswerRequest,
     container: AppContainer = Depends(get_container),
 ):
-    """提交题目作答，执行判卷、SM-2 复习周期更新与错题本归档。"""
+    """提交验证任务响应，执行混合裁决评估、SM-2 重放周期更新与失败任务自动收集。"""
     grade_tool = container.tool_registry.get("grade_tool")
     if not grade_tool:
         raise HTTPException(status_code=500, detail="grade_tool not registered")
@@ -514,7 +514,7 @@ async def get_due_reviews(
     limit: int = Query(10, ge=1, le=50),
     container: AppContainer = Depends(get_container),
 ):
-    """查询用户今日到期需复习的知识点（SM-2）与未解决错题列表。"""
+    """查询用户当前到期需重放的知识节点（SM-2）与未收敛失败任务列表。"""
     due_kps = await container.learning_store.get_due_reviews(user_id=user_id, limit=limit)
     mistakes = await container.learning_store.list_mistakes(
         user_id=user_id, resolved=False, limit=limit
@@ -531,7 +531,7 @@ async def get_user_progress(
     user_id: str,
     container: AppContainer = Depends(get_container),
 ):
-    """获取用户的全量学情看板（掌握度分布、近期正确率、薄弱知识点、待复习数）。"""
+    """获取用户的全量闭环状态遥测看板（稳健度分布、近期通过率、薄弱节点、待重放数）。"""
     return await container.learning_store.get_progress_report(user_id=user_id)
 
 
@@ -541,7 +541,7 @@ async def create_study_plan(
     req: StudyPlanCreateRequest,
     container: AppContainer = Depends(get_container),
 ):
-    """基于用户薄弱点与学习目标生成结构化学习计划。"""
+    """基于低稳健度薄弱节点与优化目标生成结构化执行流水线计划。"""
     progress_tool = container.tool_registry.get("progress_tool")
     if not progress_tool:
         raise HTTPException(status_code=500, detail="progress_tool not registered")
@@ -566,6 +566,6 @@ async def list_study_plans(
     user_id: str,
     container: AppContainer = Depends(get_container),
 ):
-    """获取用户的学习计划列表。"""
+    """获取用户的优化执行流水线计划列表。"""
     plans = await container.learning_store.list_study_plans(user_id=user_id)
     return {"user_id": user_id, "count": len(plans), "plans": plans}

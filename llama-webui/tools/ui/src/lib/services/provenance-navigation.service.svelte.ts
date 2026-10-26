@@ -16,7 +16,7 @@ export interface TextbookNavigationTarget {
  * Prioritizes bold markdown, definition statements, and short clauses.
  */
 export function extractTitleCandidate(text: string): string {
-	if (!text || !text.trim()) return '知识点提炼';
+	if (!text || !text.trim()) return '知识节点提炼';
 
 	let raw = text.trim();
 
@@ -59,7 +59,7 @@ export function extractTitleCandidate(text: string): string {
 	// Check if only non-word / punctuation / symbols remain
 	const hasMeaningfulContent = /[\p{L}\p{N}]/u.test(cleaned);
 	if (!hasMeaningfulContent) {
-		return '知识点提炼';
+		return '知识节点提炼';
 	}
 
 	// Rule 2: Definition statement, e.g. "深度残差学习 是为了...", "LayerNorm 是在...", "反向传播 是基于...", "残差连接是指..."
@@ -81,7 +81,7 @@ export function extractTitleCandidate(text: string): string {
 	if (cleaned.length > 40) {
 		cleaned = cleaned.slice(0, 40);
 	}
-	return cleaned || '知识点提炼';
+	return cleaned || '知识节点提炼';
 }
 
 /**
@@ -157,7 +157,7 @@ export function extractProvenanceInfo(
 
 	// Fallback when no match found
 	if (!docTitle) {
-		docTitle = '参考教材';
+		docTitle = '知识源文档';
 	}
 	if (pageStart === undefined) {
 		pageStart = 1;

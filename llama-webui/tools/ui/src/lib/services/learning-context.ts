@@ -1,6 +1,6 @@
 /**
- * Learning-context helpers: single source of truth for the active
- * course / RAG namespace / user identity used by learning APIs.
+ * Scope-context helpers: single source of truth for the active
+ * domain (courseId) / RAG namespace / user identity used by Agent APIs.
  *
  * Keeping these in one module prevents the canvas, chat selection toolbar and
  * knowledge-base dialog from drifting back to hard-coded `default` values.

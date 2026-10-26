@@ -14,9 +14,9 @@ class ChatRequest(BaseModel):
     images: list[str] | None = Field(None, description="可选：受控上传目录内的图片路径、Data URL 或 HTTP URL 列表")
     mode: str | None = Field(
         None,
-        description="可选：显式指定学习模式 (explain/quiz/grade/review/plan/homework/chat)，为空时自动路由",
+        description="可选：显式指定执行模式 (explain/quiz/grade/review/plan/homework/chat)，为空时自动路由",
     )
-    course_id: str | None = Field(None, description="可选：关联课程 ID")
+    course_id: str | None = Field(None, description="可选：关联知识域 ID")
     rag_namespace: str | None = Field(
         None,
         description="可选：关联 RAG 知识库命名空间，为空时遵循会话绑定或回退 default",
@@ -45,7 +45,7 @@ class RagSearchRequest(BaseModel):
 
 
 class RagAttributeRequest(BaseModel):
-    """Selected quote attribution: match a quote back to the textbook chunk it came from."""
+    """Selected quote attribution: match a quote back to the source document chunk it came from."""
 
     quote: str = Field(..., min_length=2, max_length=8000)
     namespace: str = "default"

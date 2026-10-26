@@ -104,9 +104,6 @@ def sanitize_search_query(query: str) -> str:
     if not raw:
         return ""
     cleaned = _CONVERSATIONAL_NOISE_RE.sub(" ", raw)
-    # 若包含英文音译变体 Möning，补充中文实体名以便跨源命中
-    if re.search(r"m[öo]ning", cleaned, re.IGNORECASE) and "莫宁" not in cleaned:
-        cleaned = f"{cleaned} 鸣潮 莫宁"
     tokens = [t.strip("的了呢吗吧啊") for t in _SPLIT_RE.split(cleaned) if t.strip("的了呢吗吧啊")]
     if not tokens:
         return raw[:80]
@@ -183,7 +180,7 @@ def score_result_relevance(query: str, result: WebSearchResult) -> float:
 
     for idx, kw in enumerate(keywords):
         kw_l = kw.lower()
-        # 第 2 个及之后的具体实体词（例如“鸣潮 莫宁”中的“莫宁”或“私服”）权重更高
+        # 第 2 个及之后的具体实体词权重更高
         weight = 1.6 if idx == 1 else (1.3 if idx == 0 else 1.0)
         in_title = kw_l in title_lower
         in_snippet = kw_l in snippet_lower
@@ -200,7 +197,7 @@ def score_result_relevance(query: str, result: WebSearchResult) -> float:
         if (k0 in title_lower or k0 in snippet_lower) and (k1 in title_lower or k1 in snippet_lower):
             score += 3.5
         elif k1 not in title_lower and k1 not in snippet_lower:
-            # 仅命中第 1 个泛词（如只命中《鸣潮》官网首页，未提及“莫宁”），显著降权
+            # 仅命中第 1 个泛词而未提及核心专有名词时，显著降权
             score *= 0.15
 
     # 百科/Wiki/专题攻略长文加分
@@ -363,7 +360,7 @@ class BingProvider(SearchProvider):
     """Bing RSS 搜索：无需自建服务或 API Key，作为 SearXNG/Tavily 的兜底。
 
     内置多关键词反投毒回退：当 cn.bing.com 对 >=3 个词的查询返回单字字典投毒结果时，
-    自动用核心双实体词（如 '鸣潮 莫宁'）二次检索并按全量关键词重排。
+    自动用核心双实体词二次检索并按全量关键词重排。
     """
 
     name = "bing"

@@ -90,12 +90,12 @@
 	);
 
 	const RETRIEVAL_MODE_LABELS: Record<string, string> = {
-		explain: '讲解模式',
-		quiz: '练习模式',
-		grade: '判分模式',
-		review: '复习模式',
-		plan: '规划模式',
-		homework: '作业辅导',
+		explain: '解析模式',
+		quiz: '测试生成',
+		grade: '评估裁决',
+		review: '衰减重放',
+		plan: '流水线编排',
+		homework: '多模态解析',
 		chat: '对话模式'
 	};
 
@@ -200,7 +200,7 @@
 		<div class="knowledge-capsules mt-2.5 mb-2 flex flex-wrap items-center gap-1.5 pt-1">
 			<span class="text-[11px] text-muted-foreground flex items-center gap-1">
 				<Brain class="h-3 w-3 text-primary" />
-				已沉淀知识点:
+				已沉淀知识节点:
 			</span>
 			{#each associatedKnowledgeNodes as knode (knode.id)}
 				<button

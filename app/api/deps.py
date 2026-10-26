@@ -23,7 +23,7 @@ def get_user_id(
 ) -> str:
     """调用方身份标识（本地单用户默认 default_user）。
 
-    这不是身份认证；它只用于学习数据层的归属校验，配合可选 API_TOKEN 使用。
+    这不是身份认证；它只用于数据层的作用域归属校验，配合可选 API_TOKEN 使用。
     """
     cleaned = (x_user_id or "").strip()
     return cleaned or DEFAULT_USER_ID

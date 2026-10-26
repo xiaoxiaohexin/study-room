@@ -1,5 +1,5 @@
 /**
- * Knowledge Base (RAG Namespace) configuration and presets for intelligent tutoring.
+ * Knowledge Base (RAG Namespace) configuration and domain presets for the general Agent.
  */
 
 export interface KnowledgeBaseOption {
@@ -14,7 +14,7 @@ export const PRESET_KNOWLEDGE_BASES: KnowledgeBaseOption[] = [
 	{
 		id: 'default',
 		label: '默认知识库 (通用)',
-		description: '默认通用辅导知识库',
+		description: '默认通用知识库命名空间',
 		shortBadge: '默认'
 	},
 	{

@@ -5,12 +5,12 @@
    - 当本地 llama-server (默认 127.0.0.1:8083) 在线时，100% 原样透传；
    - 当本地 llama-server 未启动或离线测试时，提供与 llama-server 格式完全兼容的兜底响应，防止前端卡在 ServerLoadingSplash。
 2. 拦截增强 POST /v1/chat/completions：
-   - 在转发给 llama-server 之前，自动并行检索自定义后端的 RAG 教材切片、四层记忆与 SM-2 学情画像；
+   - 在转发给 llama-server 之前，自动并行检索自定义后端的 RAG 文档切片、四层记忆与 SM-2 状态遥测画像；
    - 采用前缀 KV Cache 友好的方式注入上下文（不破坏历史轮次 messages 前缀）；
    - 完整保留并透传 llama.cpp 专有采样参数（cache_prompt, min_p, top_k, top_p, repeat_penalty, repeat_last_n, samplers 等）；
    - 原生零缓冲透传 SSE 响应流（同时保留 delta.reasoning_content 思考流、delta.content 正文流与 timings 性能指标）。
 3. 原生 MCP Server 协议端点 (POST /mcp)：
-   - 将后端的 RAG 检索、课程知识图谱、SM-2 测验判卷、四层记忆等工具直接暴露为标准 MCP JSON-RPC 2.0 服务，
+   - 将后端的 RAG 检索、知识图谱管理、SM-2 评估裁决、四层记忆等工具直接暴露为标准 MCP JSON-RPC 2.0 服务，
      可直接挂载到 llama.cpp WebUI 左侧的「MCP Servers」面板。
 """
 
@@ -148,7 +148,7 @@ async def _archive_dialogue_turn(
     course_id: str | None = None,
     rag_namespace: str | None = None,
 ) -> None:
-    """统一沉淀会话日志 (JSONL)、四层学情记忆与会话历史状态到数据库。"""
+    """统一沉淀会话日志 (JSONL)、四层记忆与会话历史状态到数据库。"""
     if not query and not answer:
         return
 
@@ -263,7 +263,7 @@ def _inject_context_into_messages(
     messages: list[dict[str, Any]],
     rag_block: str,
 ) -> list[dict[str, Any]]:
-    """以 KV Cache 友好的方式将后端检索到的 RAG/记忆/学情注入到最后一条 user 消息中。
+    """以 KV Cache 友好的方式将后端检索到的 RAG/记忆/状态遥测注入到最后一条 user 消息中。
 
     这样可以保证多轮对话前面的 messages[0..-2] 完全不变，从而在 llama-server 开启
     `cache_prompt: true` 时 100% 命中历史轮次的 KV Cache！
@@ -308,7 +308,7 @@ async def _build_rag_and_memory_block(
     retrieval_mode: str = "local",
     allow_web_fallback: bool = True,
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
-    """并行检索 RAG 教材切片、四层学情记忆与 SM-2 学习者画像，组装为精简上下文块。
+    """并行检索 RAG 文档切片、四层记忆与 SM-2 状态遥测画像，组装为精简上下文块。
 
     当本地 RAG 置信度不足且开启 ``WEB_FALLBACK_MODE=auto`` 时，会通过 MCP/搜索
     Provider 联网补充，并把来源暂存到临时知识库（B 通道）。返回
@@ -347,7 +347,7 @@ async def _build_rag_and_memory_block(
     rag_sources: list[dict[str, Any]] = []
 
     if profile and str(profile).strip():
-        sections.append(f"### [Learner Profile & SM-2 Mastery]\n{str(profile).strip()}")
+        sections.append(f"### [Agent State & SM-2 Telemetry]\n{str(profile).strip()}")
 
     if docs:
         doc_lines = []
@@ -373,11 +373,11 @@ async def _build_rag_and_memory_block(
                     "content": d.content[:300] if hasattr(d, "content") else "",
                 }
             )
-        sections.append("### [Retrieved Course Materials (RAG)]\n" + "\n\n".join(doc_lines))
+        sections.append("### [Retrieved Knowledge Sources (RAG)]\n" + "\n\n".join(doc_lines))
 
     if memories:
         mem_lines = [f"[{sm.item.type.upper()} MEMORY] {sm.item.content}" for sm in memories]
-        sections.append("### [Relevant Learner Memories]\n" + "\n".join(mem_lines))
+        sections.append("### [Relevant Agent Memories]\n" + "\n".join(mem_lines))
 
     # B 通道：本地知识库不足时联网补充，并自动暂存到临时知识库
     web_sources: list[dict[str, Any]] = []
@@ -410,10 +410,10 @@ async def _build_rag_and_memory_block(
         return "", [], []
 
     header_instruction = (
-        "以下是系统从本地知识库（RAG）与学情记忆库中自动检索到的背景资料，"
+        "以下是系统从本地知识库（RAG）与多层记忆库中自动检索到的背景资料，"
         "请优先依据这些资料准确回答用户问题。"
         "若出现 [WEB: ...] 标记，那是联网补充的外部资料，属于非权威来源，"
-        "引用时必须标注标题、URL 与抓取时间，且不得覆盖本地教材结论："
+        "引用时必须标注标题、URL 与抓取时间，且不得覆盖本地知识库权威结论："
     )
     return header_instruction + "\n\n" + "\n\n".join(sections), rag_sources, web_sources
 
@@ -690,7 +690,7 @@ async def llama_chat_completions(
     container: AppContainer = Depends(get_container),
 ):
     """兼容 llama.cpp WebUI 与 OpenAI 标准的核心对话接口：
-    1. 拦截请求，并行检索自定义后端的 RAG 知识库、四层学情记忆与 SM-2 画像；
+    1. 拦截请求，并行检索自定义后端的 RAG 知识库、四层记忆与 SM-2 状态遥测画像；
     2. 将检索到的上下文以不破坏历史 KV Cache 的方式注入 messages；
     3. 完整保留并透传 llama.cpp 专有采样参数（cache_prompt, min_p, top_k, top_p, samplers 等）；
     4. 原样流式转发 llama-server 的 SSE 响应（完整保留 delta.reasoning_content 与 timings）。
@@ -780,7 +780,7 @@ async def llama_chat_completions(
             explicit_mode=explicit_mode,
         )
 
-    # 2. 执行自定义后端的 RAG + 四层记忆 + SM-2 学情画像并行检索
+    # 2. 执行自定义后端的 RAG + 四层记忆 + SM-2 状态遥测画像并行检索
     rag_block = ""
     rag_sources: list[dict[str, Any]] = []
     web_sources: list[dict[str, Any]] = []
@@ -944,7 +944,7 @@ async def llama_chat_completions(
                     yield f"data: {json.dumps(sse_chunk, ensure_ascii=False)}\n\n".encode()
                 yield b"data: [DONE]\n\n"
 
-            # 异步沉淀全流程对话日志 (JSONL)、四层学情记忆与会话历史状态
+            # 异步沉淀全流程对话日志 (JSONL)、四层记忆与会话历史状态
             full_answer = "".join(collected_answer).strip()
             full_thought = "".join(collected_thought).strip()
             if not full_thought and full_answer:

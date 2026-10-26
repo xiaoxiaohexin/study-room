@@ -109,7 +109,7 @@
 	<Drawer.Root bind:open={isOpen}>
 		<Drawer.Content>
 			<Drawer.Header>
-				<Drawer.Title>选择课程知识库</Drawer.Title>
+				<Drawer.Title>选择知识库</Drawer.Title>
 			</Drawer.Header>
 
 			<div class="flex flex-col gap-1 px-3 pb-6">
@@ -167,7 +167,7 @@
 
 		<DropdownMenu.Content align="end" class="min-w-64 p-1.5">
 			<div class="px-2 py-1 text-xs font-semibold text-muted-foreground select-none">
-				课程与知识库
+				知识域与知识库
 			</div>
 
 			{#each PRESET_KNOWLEDGE_BASES as option (option.id)}

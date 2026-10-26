@@ -88,7 +88,7 @@ def test_context_builder_excludes_hyde_and_injects_learner_profile():
     sys_text = built.messages[0].content
     assert "HYPOTHETICAL ANCHOR" not in sys_text
     assert "不应出现在最终系统提示词中" not in sys_text
-    assert "### [Learner Profile & Mastery]" in sys_text
+    assert "### [Agent State & Node Telemetry]" in sys_text
     assert "复合函数求导" in sys_text
 
 

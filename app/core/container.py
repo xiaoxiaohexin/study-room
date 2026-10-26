@@ -74,7 +74,7 @@ class AppContainer:
         self.llm: LLMClient
         self.embedder: Embedder
 
-        # 3. 记忆系统与学习域核心
+        # 3. 记忆系统与闭环控制核心
         self.working_memory: BaseMemory
         self.episodic_memory: BaseMemory
         self.semantic_memory: BaseMemory
@@ -193,7 +193,7 @@ class AppContainer:
             self.status["llm"] = "fake:offline_test"
             log.info("llm_client_using_fake")
 
-        # 7. 初始化记忆系统与学习域引擎
+        # 7. 初始化记忆系统与闭环控制引擎
         self.working_memory = WorkingMemory(
             capacity=s.working_capacity,
             ttl_seconds=s.working_ttl_seconds,
@@ -303,7 +303,7 @@ class AppContainer:
         )
         self.query_expander = QueryExpander(llm=self.llm)
 
-        # 10. 初始化工具体系（基础工具 + 5 个辅助学习专用工具）
+        # 10. 初始化工具体系（基础工具 + 5 个闭环控制专用工具）
         self.tool_registry = ToolRegistry(
             default_timeout=s.tool_timeout_seconds,
             max_output_chars=s.tool_output_max_chars,

@@ -1,4 +1,4 @@
-"""学习领域核心算法：确定性 SM-2 间隔重复、EMA 掌握度更新与客观题判分。"""
+"""闭环控制核心算法：确定性 SM-2 记忆衰减重放调度、EMA 节点稳健度更新与客观任务确定性裁决。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def score_to_quality(
     hints_used: int = 0,
     elapsed_sec: float = 0.0,
 ) -> int:
-    """将作答得分 (0~1)、是否使用提示与耗时映射为 SM-2 质量分 q ∈ [0, 5]。"""
+    """将评估得分 (0~1)、前置辅助阶数与执行耗时映射为 SM-2 衰减质量分 q ∈ [0, 5]。"""
     if not is_correct or score < 0.6:
         if score >= 0.4:
             return 2
@@ -29,7 +29,7 @@ def score_to_quality(
             return 1
         return 0
 
-    # 答对的情况 (q ∈ {3, 4, 5})
+    # 裁决通过的情况 (q ∈ {3, 4, 5})
     if hints_used >= 2 or score < 0.75:
         return 3
     if hints_used == 1 or score < 0.9 or elapsed_sec > 120:
@@ -44,7 +44,7 @@ def compute_sm2(
     quality: int,
     now: float | None = None,
 ) -> SM2State:
-    """标准 SM-2 间隔重复算法（确定性代码计算）。"""
+    """标准 SM-2 记忆衰减调度算法（确定性代码计算下一次重放时间）。"""
     ts = now if now is not None else time.time()
     q = max(0, min(5, int(quality)))
 
@@ -78,10 +78,10 @@ def update_mastery_ema(
     difficulty: float = 0.5,
     alpha: float = 0.3,
 ) -> float:
-    """指数滑动平均更新知识点掌握度 m_t ∈ [0, 1]，题目难度越高权重越大。"""
+    """指数滑动平均（EMA）更新知识节点稳健度指标 m_t ∈ [0, 1]，任务复杂度越高更新权重越大。"""
     s = max(0.0, min(1.0, float(score)))
     d = max(0.1, min(1.0, float(difficulty)))
-    # 难度权重 w_d ∈ [0.7, 1.3]
+    # 复杂度权重 w_d ∈ [0.7, 1.3]
     w_d = 0.6 + 0.7 * d
     eff_alpha = max(0.05, min(0.6, alpha * w_d))
     new_m = (1.0 - eff_alpha) * prev_mastery + eff_alpha * s
@@ -89,9 +89,9 @@ def update_mastery_ema(
 
 
 def _normalize_choice(text: str) -> str:
-    """提取选择题选项字母（如 '我选B'、'选A'、'A. xxx' -> 'A'）。"""
+    """提取客观单选/多选任务选项标识（如 '我选B'、'选A'、'A. xxx' -> 'A'）。"""
     s = text.strip().upper()
-    m = re.match(r"^(?:我?选\s*|我的?(?:答案|回答)(?:是|为)?\s*|答案(?:是|为)?\s*)?([A-F])(?:\b|[.、:：\s]|$)", s)
+    m = re.match(r"^(?:我?选\s*|我的?(?:答案|回答|结果)(?:是|为)?\s*|答案(?:是|为)?\s*)?([A-F])(?:\b|[.、:：\s]|$)", s)
     if m:
         return m.group(1)
     if len(s) == 1 and s in "ABCDEF":
@@ -100,7 +100,7 @@ def _normalize_choice(text: str) -> str:
 
 
 def grade_objective(q_type: str, expected_answer: str, user_answer: str) -> tuple[bool, float]:
-    """确定性判分：支持 choice（单选/多选）与 fill（填空）。"""
+    """客观测试任务确定性规则裁决：支持 choice（选项匹配）与 fill（精确文本匹配）。"""
     exp = expected_answer.strip()
     usr = user_answer.strip()
     if not usr:
@@ -112,7 +112,7 @@ def grade_objective(q_type: str, expected_answer: str, user_answer: str) -> tupl
         ok = norm_exp == norm_usr or exp.lower() == usr.lower()
         return ok, (1.0 if ok else 0.0)
 
-    # 填空题：忽略大小写、首尾标点与多余空白
+    # 精确匹配任务：忽略大小写、首尾标点与多余空白
     clean_exp = re.sub(r"\s+", " ", exp.lower()).strip("。.!！?？,，;；")
     clean_usr = re.sub(r"\s+", " ", usr.lower()).strip("。.!！?？,，;；")
     ok = clean_exp == clean_usr

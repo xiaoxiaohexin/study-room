@@ -484,7 +484,7 @@
 			if (searchResults.length > 0) {
 				toast.success(`检索完成，命中 ${searchResults.length} 条高相关片段`);
 			} else {
-				toast.info('未检索到匹配的切块，可尝试调整关键词或导入更多教材资料');
+				toast.info('未检索到匹配的切块，可尝试调整关键词或导入更多知识文档');
 			}
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
@@ -543,7 +543,7 @@
 						</span>
 					</div>
 					<Dialog.Description class="mt-0.5 text-[12px] text-muted-foreground font-normal leading-relaxed">
-						支持上传讲义教材、PDF课件、文档笔记，自动解析结构切块并存入本地持久化向量库供智能体提问调用
+						支持上传专业资料、PDF 文档、技术手册与笔记，自动解析结构切块并存入本地持久化向量库供智能体检索调用
 					</Dialog.Description>
 				</div>
 			</div>
@@ -624,7 +624,7 @@
 				type="button"
 			>
 				<UploadCloud class="h-3.5 w-3.5 text-primary" />
-				<span>导入新文档 / 课件</span>
+				<span>导入新文档 / 资料</span>
 			</button>
 
 			<button
@@ -708,7 +708,7 @@
 							{selectedFile ? `已选择：${selectedFile.name}` : '点击选择或拖拽文件到此处'}
 						</div>
 						<p class="mt-1 text-xs text-muted-foreground max-w-md">
-							支持 PDF 讲义、教材电子书、Markdown、Word(Docx)、纯文本、代码或题目图片。后端将智能通过 MarkItDown 提取内容并自动按标题层级分块。
+							支持 PDF 文档、电子书、Markdown、Word(Docx)、纯文本、代码或图表扫描件。后端将智能通过 MarkItDown 提取内容并自动按标题层级分块。
 						</p>
 
 						<div class="mt-3 flex flex-wrap items-center justify-center gap-1.5 text-[10px] text-muted-foreground">
@@ -717,7 +717,7 @@
 							<span class="rounded bg-muted px-1.5 py-0.5">Word (.docx)</span>
 							<span class="rounded bg-muted px-1.5 py-0.5">TXT / JSON</span>
 							<span class="rounded bg-muted px-1.5 py-0.5">代码 (.py/.sql)</span>
-							<span class="rounded bg-muted px-1.5 py-0.5">题目图片 OCR</span>
+							<span class="rounded bg-muted px-1.5 py-0.5">图表扫描件 OCR</span>
 						</div>
 
 						{#if selectedFile}
@@ -788,7 +788,7 @@
 						<div class="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border py-12 text-center">
 							<BookOpen class="h-8 w-8 text-muted-foreground/50 mb-2" />
 							<p class="text-sm font-medium text-foreground">当前空间暂无已收录知识库文档</p>
-							<p class="mt-1 text-xs text-muted-foreground">点击上方「导入新文档」将课件或题库录入向量库</p>
+							<p class="mt-1 text-xs text-muted-foreground">点击上方「导入新文档」将参考文档录入向量库</p>
 							<Button
 								class="mt-4 gap-1 text-xs"
 								onclick={() => (activeTab = 'upload')}
@@ -855,7 +855,7 @@
 							bind:value={testQuery}
 							class="text-xs"
 							onkeydown={(e) => e.key === 'Enter' && handleRunTestSearch()}
-							placeholder="输入要检索测试的问题或考点概念（如：以太网 MAC 地址格式）…"
+							placeholder="输入要检索测试的问题或核心概念（如：以太网 MAC 地址格式）…"
 						/>
 						<Button
 							class="gap-1.5 shrink-0 text-xs"
@@ -1026,7 +1026,7 @@
 						<Input
 							bind:value={stagingCourseId}
 							class="h-8 max-w-56 text-xs"
-							placeholder="目标课程 ID（默认 default）"
+							placeholder="目标知识域 ID（默认 default）"
 						/>
 						<Button class="h-8 gap-1.5 text-xs" disabled={stagingBusy} onclick={loadStagingData} size="sm" variant="outline">
 							<RefreshCw class="h-3.5 w-3.5 {stagingBusy ? 'animate-spin' : ''}" />

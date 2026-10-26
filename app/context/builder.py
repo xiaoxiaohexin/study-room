@@ -40,7 +40,7 @@ class ContextBuilder:
         learner_profile: str | None = None,
     ) -> list[ContextPacket]:
         """阶段1：多源信息汇聚。
-        注意：hyde_doc 仅用于向量库检索（Query Expansion），不再注入 LLM Prompt，防止小参数模型将其误判为权威教材事实。
+        注意：hyde_doc 仅用于向量库检索（Query Expansion），不再注入 LLM Prompt，防止小参数模型将其误判为权威知识库事实。
         """
         log.info(
             "context_gather_started",
@@ -79,7 +79,7 @@ class ContextBuilder:
             )
         )
 
-        # 2.5 学习者画像与薄弱点摘要（高优先级）
+        # 2.5 系统状态遥测与低稳健度薄弱节点摘要（高优先级）
         if learner_profile and learner_profile.strip():
             packets.append(
                 ContextPacket(
@@ -209,7 +209,7 @@ class ContextBuilder:
         user_query: str,
         user_images: list[str] | None = None,
     ) -> BuiltContext:
-        """阶段3 & 4：结构化分区组装 [Role & Policies] / [Learner Profile] / [Evidence] / [Context] / [History]。"""
+        """阶段3 & 4：结构化分区组装 [Role & Policies] / [Agent State & Node Telemetry] / [Evidence] / [Context] / [History]。"""
         role_parts = [p.content for p in selected if p.source == "system"]
         profile_parts = [p.content for p in selected if p.source == "profile"]
         evidence_parts = [p.content for p in selected if p.source in ("rag", "note")]
@@ -221,7 +221,7 @@ class ContextBuilder:
             sections.append("### [Role & Policies]\n" + "\n\n".join(role_parts))
 
         if profile_parts:
-            sections.append("### [Learner Profile & Mastery]\n" + "\n\n".join(profile_parts))
+            sections.append("### [Agent State & Node Telemetry]\n" + "\n\n".join(profile_parts))
 
         if evidence_parts:
             sections.append("### [Evidence & Knowledge]\n" + "\n\n".join(evidence_parts))

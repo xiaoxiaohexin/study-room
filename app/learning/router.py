@@ -1,4 +1,8 @@
-"""学习意图路由器（IntentRouter）：分模式提示词与精简工具子集路由。"""
+"""闭环控制意图路由器（IntentRouter）：分模式提示词与精简工具子集动态挂载。
+
+核心闭环链路：
+基于 RAG 检索知识源生成测试 (quiz) -> 自动化混合裁决评估 (grade) -> 基于记忆衰减（SM-2）计算下一次重放时间并软收敛失败任务 (review) -> 状态遥测与编排优化流水线 (plan)。
+"""
 
 from __future__ import annotations
 
@@ -28,7 +32,7 @@ class RouteDecision:
     expose_tools: bool = True
 
 
-# 每个模式下仅暴露 2~4 个最相关的工具，防止本地小模型（Gemma-4 E4B）工具选择过载
+# 每个模式下仅暴露 2~4 个最相关的工具，防止本地小参数模型工具选择过载
 MODE_TOOLS: dict[LearningMode, list[str]] = {
     "explain": ["rag_search_tool", "knowledge_tool", "note_tool", "web_tool"],
     "quiz": ["quiz_tool", "knowledge_tool", "rag_search_tool"],
@@ -53,60 +57,67 @@ MODE_PROMPTS: dict[LearningMode, str] = {
     "explain": AGENT_SYSTEM_PROMPT
     + """
 
-【当前模式：知识讲解模式 (Explain)】
-1. 严格依据上下文中的 `[DOCUMENT]` 教材资料与 `[Learner Profile & Mastery]` 水平进行讲解；若教材未覆盖该内容，请明确说明。
-2. 讲解结构清晰：先给直观核心定义，再给推导/原理解析与典型例题，最后抛出 1 个启发性小问题检验理解。
-3. 如需补充查阅教材或知识点结构，请调用 `rag_search_tool` 或 `knowledge_tool`。""",
+【当前模式：知识溯源与深度解析模式 (Explain)】
+1. 严格依据上下文中的 `[DOCUMENT]` 知识源切片与系统状态遥测信息进行解析；若知识库未覆盖该内容，请明确说明。
+2. 结构化输出核心定义、机制原理与关键应用示例，并标注文档页码出处。
+3. 如需补充检索文档切片或登记知识节点，请调用 `rag_search_tool` 或 `knowledge_tool`。""",
     "quiz": AGENT_SYSTEM_PROMPT
     + """
 
-【当前模式：练习出题模式 (Practice / Quiz)】
-1. 请优先调用 `quiz_tool`（action="generate" 或 action="next"）为学生生成或抽取针对性练习题。
-2. 出题展示时：**只展示题干、题号（question_id）与选项**，绝对不要直接把标准答案和解析剧透给学生，引导学生在下一轮作答。""",
+【当前模式：基准验证测试生成模式 (Test Generation / Quiz)】
+1. 请优先调用 `quiz_tool`（action="generate" 或 action="next"）结合知识源生成或抽取结构化验证测试任务。
+2. 展示测试任务时：**仅展示任务题干、任务编号（question_id）与候选项**，请勿提前暴露基准答案与判定解析，等待下一轮响应提交。""",
     "grade": AGENT_SYSTEM_PROMPT
     + """
 
-【当前模式：作答判分与诊断模式 (Grade)】
-1. 学生正在提交题目答案。请调用 `grade_tool` 对学生的回答进行判分、更新掌握度（Mastery）与 SM-2 复习排期。
-2. 结合 `grade_tool` 返回的判分结果、标准答案与错因（概念混淆/计算失误/审题错误/知识遗忘），给学生清晰的讲解与鼓励。""",
+【当前模式：自动化混合裁决与诊断模式 (Hybrid Adjudication / Grade)】
+1. 用户正在提交待测任务的响应结果。请调用 `grade_tool` 执行混合裁决评估、更新节点稳健度（EMA）并基于记忆衰减（SM-2）计算下一次重放时间。
+2. 结合 `grade_tool` 返回的裁决得分、基准答案与偏差分类（concept/calculation/misread/incomplete），输出清晰的诊断结论。""",
     "review": AGENT_SYSTEM_PROMPT
     + """
 
-【当前模式：间隔复习与错题攻坚模式 (Review)】
-1. 请调用 `review_tool` 查看学生今日到期的 SM-2 复习知识点与未解决错题。
-2. 针对薄弱点帮学生梳理核心易错概念，或调用 `quiz_tool` 出变式题巩固。""",
+【当前模式：衰减重放调度与失败任务收敛模式 (Decay Replay / Review)】
+1. 请调用 `review_tool` 查询当前到期需重放的知识节点（SM-2）与未收敛失败任务集，或对已修复项执行软状态收敛标记（action="resolve"）。
+2. 针对低稳健度节点梳理核心机制，或调用 `quiz_tool` 生成回归验证测试。""",
     "plan": AGENT_SYSTEM_PROMPT
     + """
 
-【当前模式：学情诊断与学习规划模式 (Progress & Plan)】
-1. 请调用 `progress_tool` 获取学生的掌握度报告、薄弱知识点 Top-N 或创建结构化学习计划。
-2. 基于真实作答统计和 SM-2 到期情况给出可执行的每日/每周学习建议。""",
+【当前模式：闭环状态遥测与优化流水线编排模式 (Telemetry & Pipeline Plan)】
+1. 请调用 `progress_tool` 获取节点稳健度遥测报告、低稳健度节点 Top-N 或编排结构化优化执行流水线。
+2. 基于真实测试统计、失败任务分布与 SM-2 到期重放情况给出可执行的分阶段优化方案。""",
     "homework": AGENT_SYSTEM_PROMPT
     + """
 
-【当前模式：多模态作业苏格拉底辅导模式 (Socratic Homework Tutor)】
-1. 学生上传了题目/作业图片或正在求助解题。请遵循**苏格拉底启发式教学**：
-   - 第 1 阶：指出题目考察的核心知识点与解题方向；
-   - 第 2 阶：给出关键公式或切入点，留出关键步骤让学生自己思考；
-   - 除非学生明确要求“直接给完整解析”，否则不要一次性直接端出最终答案。""",
+【当前模式：多模态视觉解析与分步推演模式 (Multimodal Visual Analysis)】
+1. 请求包含图像输入。请结合视觉内容与知识源上下文进行结构化信息提取与分步逻辑推演：
+   - 第 1 阶段：识别图像中的关键实体、文本、图表结构与核心问题；
+   - 第 2 阶段：给出关键分析切入点、约束条件与分步推导路径。""",
     "chat": AGENT_SYSTEM_PROMPT,
 }
 
 
 class IntentRouter:
-    """高响应速度的学习意图路由器：确定性规则 + 会话待答题状态感知。"""
+    """低延迟闭环控制意图路由器：确定性规则匹配 + 会话待评估任务状态感知。"""
 
-    _QUIZ_RE = re.compile(r"(出.{0,4}题|考考我|做.{0,3}题|练习题|来.{0,3}道题|测验|quiz|刷题)", re.IGNORECASE)
-    _REVIEW_RE = re.compile(r"(复习|错题|待复习|review|今天学什么|到期)", re.IGNORECASE)
+    _QUIZ_RE = re.compile(
+        r"(生成.{0,4}测试|基准测试|生成.{0,4}验证|出.{0,4}题|考考我|做.{0,3}题|练习题|来.{0,3}道题|测验|quiz|刷题)",
+        re.IGNORECASE,
+    )
+    _REVIEW_RE = re.compile(
+        r"(重放|失败任务|异常案例|待重放|软收敛|复习|错题|待复习|review|今天学什么|到期)",
+        re.IGNORECASE,
+    )
     _PLAN_RE = re.compile(
-        r"(学习计划|规划|进度|掌握度|薄弱点|学情|诊断报告|考前冲刺|plan|progress)", re.IGNORECASE
+        r"(优化流水线|流水线编排|遥测报告|稳健度|薄弱节点|学习计划|规划|进度|掌握度|薄弱点|学情|诊断报告|考前冲刺|plan|progress)",
+        re.IGNORECASE,
     )
     _GRADE_RE = re.compile(
-        r"^(?:我?选\s*[A-Fa-f]|答案(?:是|为)?\s*\S+|我的(?:答案|回答)(?:是|为)|提交答案|判分|批改)",
+        r"^(?:我?选\s*[A-Fa-f]|答案(?:是|为)?\s*\S+|我的(?:答案|回答|结果)(?:是|为)|提交(?:答案|响应|结果)|裁决|评估结果|判分|批改)",
         re.IGNORECASE,
     )
     _EXPLAIN_RE = re.compile(
-        r"(讲一下|讲解|什么是|为什么|怎么理解|原理是|推导|解释一下|教我|概念|知识点)", re.IGNORECASE
+        r"(解析一下|讲一下|讲解|什么是|为什么|怎么理解|原理是|推导|解释一下|教我|概念|知识点|知识节点)",
+        re.IGNORECASE,
     )
 
     def __init__(self, learning_store: LearningStore | None = None):
@@ -130,7 +141,7 @@ class IntentRouter:
             tool_names = []
             expose_tools = False
         elif mode in {"grade", "review", "plan"}:
-            # These modes obtain state through their dedicated tools.
+            # These modes obtain state through their dedicated closed-loop tools.
             retrieval_mode = "none"
 
         allow_web = mode not in {"grade", "review", "plan"} and has_web_intent(message)
@@ -163,7 +174,7 @@ class IntentRouter:
                 msg,
             )
 
-        # 1. 多模态图片上传默认进入苏格拉底作业辅导模式
+        # 1. 多模态图片输入默认进入多模态视觉解析模式
         if images:
             return self._make_decision(
                 "homework",
@@ -171,7 +182,7 @@ class IntentRouter:
                 msg,
             )
 
-        # 2. 检查是否存在待作答题目，且用户输入像是在作答
+        # 2. 检查是否存在待评估测试任务，且用户输入符合响应提交特征
         if self.learning_store:
             pending_q = await self.learning_store.get_latest_unanswered_question(user_id)
             if pending_q:
@@ -221,7 +232,7 @@ class IntentRouter:
                 max_steps=6,
             )
 
-        # 4. 默认通用学习对话模式
+        # 4. 默认通用智能体交互模式
         return self._make_decision(
             "chat",
             "default_chat",

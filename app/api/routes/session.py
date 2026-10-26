@@ -33,7 +33,7 @@ async def create_session(
     req: CreateSessionRequest,
     container: AppContainer = Depends(get_container),
 ):
-    """创建或获取会话，并支持绑定课程与知识库命名空间。"""
+    """创建或获取会话，并支持绑定知识域与知识库命名空间。"""
     try:
         return await container.state_manager.get_or_create_session(
             user_id=req.user_id,
@@ -71,7 +71,7 @@ async def update_user_session(
     req: UpdateSessionRequest,
     container: AppContainer = Depends(get_container),
 ):
-    """更新指定会话属性（标题、课程绑定、知识库命名空间）。"""
+    """更新指定会话属性（标题、知识域绑定、知识库命名空间）。"""
     try:
         return await container.state_manager.update_session(
             user_id=user_id,

@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS vector_points (
 );
 CREATE INDEX IF NOT EXISTS idx_vector_collection ON vector_points(collection);
 
--- ==================== 学习领域模型表 ====================
+-- ==================== 知识图谱与闭环控制模型表 ====================
 CREATE TABLE IF NOT EXISTS courses (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,

@@ -156,7 +156,7 @@ export function backendKpToCanvasNode(
 		kind: 'knowledge',
 		knowledgePointId: kp.id,
 		courseId: kp.course_id || fallbackCourseId,
-		title: kp.name || '知识点',
+		title: kp.name || '知识节点',
 		content: kp.content || kp.summary || '',
 		rawQuote: kp.raw_quote || provenance[0]?.quoteSnippet || '',
 		color: 'emerald',
